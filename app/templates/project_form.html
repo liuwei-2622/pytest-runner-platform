@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}{% if mode == 'new' %}新增项目{% else %}编辑项目{% endif %} - pytest-runner-platform{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="section-title">
+    <h1>{% if mode == 'new' %}新增项目{% else %}编辑项目{% endif %}</h1>
+    <a class="button-secondary" href="/projects">返回项目列表</a>
+  </div>
+  {% if error %}
+    <div class="alert">{{ error }}</div>
+  {% endif %}
+  <form method="post" action="{% if mode == 'new' %}/projects{% else %}/projects/{{ form.get('id') }}{% endif %}" class="form">
+    <label>
+      项目 ID
+      <input name="id" value="{{ form.get('id', '') }}" placeholder="例如 demo-api" {% if mode != 'new' %}readonly{% endif %} required>
+    </label>
+    <label>
+      项目名称
+      <input name="name" value="{{ form.get('name', '') }}" placeholder="例如 Demo API Tests" required>
+    </label>
+    <label>
+      项目根目录
+      <input name="root_path" value="{{ form.get('root_path', '') }}" placeholder="/path/to/project" required>
+    </label>
+    <label>
+      Python 解释器
+      <input name="python_executable" value="{{ form.get('python_executable', '') }}" placeholder="/path/to/.venv/bin/python" required>
+    </label>
+    <label>
+      工作目录
+      <input name="working_directory" value="{{ form.get('working_directory', '') }}" placeholder="通常等于项目根目录" required>
+    </label>
+    <label>
+      允许测试目录
+      <textarea name="allowed_test_roots" rows="4" placeholder="每行一个目录，必须位于项目根目录内" required>{{ form.get('allowed_test_roots', '') }}</textarea>
+    </label>
+    <label>
+      默认 pytest 参数
+      <textarea name="default_args" rows="4" placeholder="可选，每行一个参数，例如 -s">{{ form.get('default_args', '') }}</textarea>
+    </label>
+    <label>
+      默认环境变量
+      <textarea name="default_env" rows="5" placeholder="可选，每行一个 KEY=value">{{ form.get('default_env', '') }}</textarea>
+    </label>
+    <label>
+      报告模式
+      <select name="report_mode">
+        <option value="platform" {% if form.get('report_mode', 'platform') == 'platform' %}selected{% endif %}>platform</option>
+      </select>
+    </label>
+    <button type="submit">保存项目</button>
+  </form>
+</section>
+{% endblock %}

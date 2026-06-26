@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}运行记录 - pytest-runner-platform{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="section-title">
+    <h1>运行记录</h1>
+    <a class="button-secondary" href="/">新建运行</a>
+  </div>
+  {% if runs %}
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>项目</th>
+          <th>状态</th>
+          <th>路径</th>
+          <th>创建时间</th>
+          <th>耗时</th>
+          <th>返回码</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for run in runs %}
+          <tr>
+            <td><a href="/runs/{{ run.id }}"><code>{{ run.id }}</code></a></td>
+            <td>{{ run.project_name }} <span class="muted">({{ run.project_id }})</span></td>
+            <td><span class="badge badge-{{ run.status }}">{{ run.status }}</span></td>
+            <td><code>{{ run.test_path }}</code></td>
+            <td>{{ run.created_at }}</td>
+            <td>{{ run.duration_seconds if run.duration_seconds is not none else '-' }}s</td>
+            <td>{{ run.return_code if run.return_code is not none else '-' }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="muted">暂无运行记录。</p>
+  {% endif %}
+</section>
+{% endblock %}

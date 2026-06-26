@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}项目配置 - pytest-runner-platform{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="section-title">
+    <h1>项目配置</h1>
+    <a class="button-secondary" href="/projects/new">新增项目</a>
+  </div>
+  {% if error %}
+    <div class="alert">{{ error }}</div>
+  {% endif %}
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>名称</th>
+        <th>根目录</th>
+        <th>Python</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for project in projects %}
+        <tr>
+          <td><code>{{ project.id }}</code></td>
+          <td>{{ project.name }}</td>
+          <td><code>{{ project.root_path }}</code></td>
+          <td><code>{{ project.python_executable }}</code></td>
+          <td class="actions">
+            <a href="/?project_id={{ project.id }}">运行</a>
+            <a href="/projects/{{ project.id }}/edit">编辑</a>
+            <form method="post" action="/projects/{{ project.id }}/delete" class="inline-form">
+              <button type="submit" class="link-button">删除</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

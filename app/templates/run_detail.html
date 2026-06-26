@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}运行 {{ run.id }} - pytest-runner-platform{% endblock %}
+{% block head %}
+  {% if run.status in ['queued', 'running'] %}
+    <meta http-equiv="refresh" content="3">
+  {% endif %}
+{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="section-title">
+    <h1>运行 <code>{{ run.id }}</code></h1>
+    <span class="badge badge-{{ run.status }}">{{ run.status }}</span>
+  </div>
+
+  {% if run.error_message %}
+    <div class="alert">{{ run.error_message }}</div>
+  {% endif %}
+
+  <dl class="details">
+    <dt>项目</dt><dd>{{ run.project_name }} <span class="muted">({{ run.project_id }})</span></dd>
+    <dt>测试路径</dt><dd><code>{{ run.test_path }}</code></dd>
+    <dt>创建时间</dt><dd>{{ run.created_at }}</dd>
+    <dt>开始时间</dt><dd>{{ run.started_at or '-' }}</dd>
+    <dt>结束时间</dt><dd>{{ run.finished_at or '-' }}</dd>
+    <dt>耗时</dt><dd>{{ run.duration_seconds if run.duration_seconds is not none else '-' }}s</dd>
+    <dt>返回码</dt><dd>{{ run.return_code if run.return_code is not none else '-' }}</dd>
+    <dt>xdist</dt><dd>{{ run.options.workers }}</dd>
+    {% if project %}
+      <dt>工作目录</dt><dd><code>{{ project.working_directory }}</code></dd>
+      <dt>Python</dt><dd><code>{{ project.python_executable }}</code></dd>
+    {% endif %}
+  </dl>
+
+  <h2>环境变量</h2>
+  {% if run.options.env_vars %}
+    <pre class="code">{% for key in run.options.env_vars.keys() | sort %}{{ key }}=******
+{% endfor %}</pre>
+  {% else %}
+    <p class="muted">未配置本次运行环境变量。</p>
+  {% endif %}
+
+  <h2>命令</h2>
+  {% if run.command %}
+    <pre class="code">{{ run.command | join(' ') }}</pre>
+  {% else %}
+    <p class="muted">任务仍在队列中。</p>
+  {% endif %}
+
+  <h2>报告与日志</h2>
+  <div class="links">
+    <a href="/runs/{{ run.id }}/reports/pytest.html">HTML 报告</a>
+    <a href="/runs/{{ run.id }}/reports/junit.xml">JUnit XML</a>
+    {% if has_allure_report %}
+      <a href="/runs/{{ run.id }}/reports/allure">Allure 报告</a>
+    {% endif %}
+    {% if has_allure_results %}
+      <a href="/runs/{{ run.id }}/reports/allure-results.zip">Allure Results ZIP</a>
+    {% endif %}
+    <a href="/runs/{{ run.id }}/logs/stdout">stdout</a>
+    <a href="/runs/{{ run.id }}/logs/stderr">stderr</a>
+  </div>
+
+  <h2>stdout 预览</h2>
+  <pre class="log">{{ stdout_preview or '暂无 stdout。' }}</pre>
+
+  <h2>stderr 预览</h2>
+  <pre class="log">{{ stderr_preview or '暂无 stderr。' }}</pre>
+</section>
+{% endblock %}

@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+jinja2
+python-multipart
+pytest>=7,<8
+pytest-html
+pytest-xdist
+allure-pytest>=2.15.0

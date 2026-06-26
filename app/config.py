@@ -1,0 +1,10 @@
+import os
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+WORKSPACE_DIR = BASE_DIR / "tests_workspace"
+REPORTS_DIR = BASE_DIR / "reports"
+MAX_CONCURRENT_RUNS = int(os.getenv("PYTEST_PLATFORM_MAX_CONCURRENT_RUNS", "2"))
+RUN_TIMEOUT_SECONDS = int(os.getenv("PYTEST_PLATFORM_RUN_TIMEOUT_SECONDS", "1800"))
+MAX_LOG_PREVIEW_BYTES = int(os.getenv("PYTEST_PLATFORM_MAX_LOG_PREVIEW_BYTES", "120000"))
+ALLOWED_WORKER_VALUES = {"disabled", "auto", "1", "2", "4", "8"}

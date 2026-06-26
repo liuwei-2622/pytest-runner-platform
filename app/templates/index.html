@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}运行测试 - pytest-runner-platform{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>运行 pytest</h1>
+  <p class="muted">选择一个 pytest 项目后，测试目标会按该项目根目录解析，并限制在项目允许的测试目录内。</p>
+  {% if error %}
+    <div class="alert">{{ error }}</div>
+  {% endif %}
+  <form method="post" action="/runs" class="form">
+    <label>
+      项目
+      <select name="project_id">
+        {% set selected_project = form.get('project_id', selected_project_id) %}
+        {% for project in projects %}
+          <option value="{{ project.id }}" {% if selected_project == project.id %}selected{% endif %}>{{ project.name }} ({{ project.id }})</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      测试目标
+      <input name="test_path" value="{{ form.get('test_path', '.') }}" placeholder="例如 .、tests、tests/test_api.py::test_login" required>
+    </label>
+    <label>
+      -k 关键字表达式
+      <input name="keyword" value="{{ form.get('keyword', '') }}" placeholder="可选，例如 login and not slow">
+    </label>
+    <label>
+      -m marker 表达式
+      <input name="marker" value="{{ form.get('marker', '') }}" placeholder="可选，例如 smoke">
+    </label>
+    <label>
+      本次运行环境变量
+      <textarea name="env_vars_text" rows="6" placeholder="可选，每行一个 KEY=value&#10;API_BASE_URL=http://127.0.0.1:8000&#10;TOKEN=secret">{{ form.get('env_vars_text', '') }}</textarea>
+    </label>
+    <div class="grid">
+      <label>
+        输出级别
+        <select name="verbosity">
+          {% set selected_verbosity = form.get('verbosity', 'normal') %}
+          <option value="normal" {% if selected_verbosity == 'normal' %}selected{% endif %}>normal</option>
+          <option value="quiet" {% if selected_verbosity == 'quiet' %}selected{% endif %}>quiet (-q)</option>
+          <option value="verbose" {% if selected_verbosity == 'verbose' %}selected{% endif %}>verbose (-v)</option>
+        </select>
+      </label>
+      <label>
+        最大失败数
+        <input name="maxfail" type="number" min="1" max="1000" value="{{ form.get('maxfail', '') }}" placeholder="可选">
+      </label>
+      <label>
+        xdist 并行
+        <select name="workers">
+          {% set selected_workers = form.get('workers', 'disabled') %}
+          {% for value in worker_values %}
+            <option value="{{ value }}" {% if selected_workers == value %}selected{% endif %}>{{ value }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+    <button type="submit">开始运行</button>
+  </form>
+</section>
+{% endblock %}
