@@ -7,36 +7,37 @@
   {% if error %}
     <div class="alert">{{ error }}</div>
   {% endif %}
-  <form method="post" action="/runs" class="form">
+  <form id="run-form" method="post" action="/runs" class="form">
     <label>
       项目
-      <select name="project_id">
+      <select id="project_id" name="project_id">
         {% set selected_project = form.get('project_id', selected_project_id) %}
         {% for project in projects %}
           <option value="{{ project.id }}" {% if selected_project == project.id %}selected{% endif %}>{{ project.name }} ({{ project.id }})</option>
         {% endfor %}
       </select>
     </label>
-    <label>
+    <label class="target-field">
       测试目标
-      <input name="test_path" value="{{ form.get('test_path', '.') }}" placeholder="例如 .、tests、tests/test_api.py::test_login" required>
+      <input id="test_path" name="test_path" value="{{ form.get('test_path', '.') }}" placeholder="例如 .、tests、tests/test_api.py::test_login" autocomplete="off" required>
+      <div id="target_suggestions" class="suggestions" hidden></div>
     </label>
     <label>
       -k 关键字表达式
-      <input name="keyword" value="{{ form.get('keyword', '') }}" placeholder="可选，例如 login and not slow">
+      <input id="keyword" name="keyword" value="{{ form.get('keyword', '') }}" placeholder="可选，例如 login and not slow">
     </label>
     <label>
       -m marker 表达式
-      <input name="marker" value="{{ form.get('marker', '') }}" placeholder="可选，例如 smoke">
+      <input id="marker" name="marker" value="{{ form.get('marker', '') }}" placeholder="可选，例如 smoke">
     </label>
     <label>
       本次运行环境变量
-      <textarea name="env_vars_text" rows="6" placeholder="可选，每行一个 KEY=value&#10;API_BASE_URL=http://127.0.0.1:8000&#10;TOKEN=secret">{{ form.get('env_vars_text', '') }}</textarea>
+      <textarea id="env_vars_text" name="env_vars_text" rows="6" placeholder="可选，每行一个 KEY=value&#10;API_BASE_URL=http://127.0.0.1:8000&#10;TOKEN=secret">{{ form.get('env_vars_text', '') }}</textarea>
     </label>
     <div class="grid">
       <label>
         输出级别
-        <select name="verbosity">
+        <select id="verbosity" name="verbosity">
           {% set selected_verbosity = form.get('verbosity', 'normal') %}
           <option value="normal" {% if selected_verbosity == 'normal' %}selected{% endif %}>normal</option>
           <option value="quiet" {% if selected_verbosity == 'quiet' %}selected{% endif %}>quiet (-q)</option>
@@ -45,11 +46,11 @@
       </label>
       <label>
         最大失败数
-        <input name="maxfail" type="number" min="1" max="1000" value="{{ form.get('maxfail', '') }}" placeholder="可选">
+        <input id="maxfail" name="maxfail" type="number" min="1" max="1000" value="{{ form.get('maxfail', '') }}" placeholder="可选">
       </label>
       <label>
         xdist 并行
-        <select name="workers">
+        <select id="workers" name="workers">
           {% set selected_workers = form.get('workers', 'disabled') %}
           {% for value in worker_values %}
             <option value="{{ value }}" {% if selected_workers == value %}selected{% endif %}>{{ value }}</option>
@@ -57,7 +58,149 @@
         </select>
       </label>
     </div>
+
+    <section class="command-preview" aria-live="polite">
+      <div class="section-title">
+        <h2>命令预览</h2>
+        <span id="command_preview_status" class="muted">等待输入...</span>
+      </div>
+      <pre id="command_preview" class="code">选择项目和测试目标后显示 pytest 命令。</pre>
+    </section>
+
+    <section class="collect-panel">
+      <div class="actions">
+        <button type="button" id="collect_button" class="button-secondary">收集测试</button>
+        <span id="collect_status" class="muted">运行前可先执行 pytest --collect-only。</span>
+      </div>
+      <pre id="collect_output" class="log" hidden></pre>
+    </section>
+
     <button type="submit">开始运行</button>
   </form>
 </section>
+
+<script>
+(() => {
+  const form = document.getElementById("run-form");
+  const project = document.getElementById("project_id");
+  const testPath = document.getElementById("test_path");
+  const suggestions = document.getElementById("target_suggestions");
+  const preview = document.getElementById("command_preview");
+  const previewStatus = document.getElementById("command_preview_status");
+  const collectButton = document.getElementById("collect_button");
+  const collectStatus = document.getElementById("collect_status");
+  const collectOutput = document.getElementById("collect_output");
+  let suggestionTimer;
+  let previewTimer;
+
+  function debounce(callback, delay, currentTimerSetter) {
+    currentTimerSetter(window.setTimeout(callback, delay));
+  }
+
+  function formData() {
+    return new FormData(form);
+  }
+
+  function setStatus(element, message, ok) {
+    element.textContent = message;
+    element.classList.toggle("status-ok", ok === true);
+    element.classList.toggle("status-error", ok === false);
+  }
+
+  async function loadSuggestions() {
+    const response = await fetch(`/api/projects/${encodeURIComponent(project.value)}/test-targets?q=${encodeURIComponent(testPath.value)}`);
+    if (!response.ok) return;
+    const data = await response.json();
+    suggestions.innerHTML = "";
+    if (!data.suggestions.length) {
+      suggestions.hidden = true;
+      return;
+    }
+    for (const item of data.suggestions) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "suggestion-item";
+      button.innerHTML = `<span>${item.value}</span><span class="suggestion-kind">${item.kind}</span>`;
+      button.addEventListener("click", () => {
+        testPath.value = item.value;
+        suggestions.hidden = true;
+        refreshPreview();
+      });
+      suggestions.appendChild(button);
+    }
+    suggestions.hidden = false;
+  }
+
+  async function refreshPreview() {
+    const response = await fetch("/api/command-preview", {
+      method: "POST",
+      body: formData(),
+      headers: {"Accept": "application/json"},
+    });
+    const data = await response.json();
+    if (!data.ok) {
+      preview.textContent = data.error;
+      setStatus(previewStatus, "预览失败", false);
+      return;
+    }
+    preview.textContent = data.display_command;
+    setStatus(previewStatus, "已更新", true);
+  }
+
+  async function collectTests() {
+    collectButton.disabled = true;
+    collectOutput.hidden = true;
+    setStatus(collectStatus, "正在收集测试...", true);
+    try {
+      const response = await fetch("/api/collect", {
+        method: "POST",
+        body: formData(),
+        headers: {"Accept": "application/json"},
+      });
+      const data = await response.json();
+      const countText = data.collected_count === null || data.collected_count === undefined ? "未知" : data.collected_count;
+      setStatus(collectStatus, data.ok ? `收集完成：${countText} 个测试` : `收集失败：${data.error || data.return_code}`, data.ok);
+      collectOutput.textContent = [
+        `$ ${data.display_command || ""}`,
+        "",
+        data.stdout || "",
+        data.stderr ? `\n[stderr]\n${data.stderr}` : "",
+      ].join("\n").trim();
+      collectOutput.hidden = false;
+    } catch (error) {
+      setStatus(collectStatus, `收集失败：${error}`, false);
+    } finally {
+      collectButton.disabled = false;
+    }
+  }
+
+  testPath.addEventListener("input", () => {
+    window.clearTimeout(suggestionTimer);
+    window.clearTimeout(previewTimer);
+    debounce(loadSuggestions, 200, timer => suggestionTimer = timer);
+    debounce(refreshPreview, 250, timer => previewTimer = timer);
+  });
+
+  for (const element of form.querySelectorAll("input, select, textarea")) {
+    if (element === testPath) continue;
+    element.addEventListener("input", () => {
+      window.clearTimeout(previewTimer);
+      debounce(refreshPreview, 250, timer => previewTimer = timer);
+    });
+    element.addEventListener("change", () => {
+      window.clearTimeout(previewTimer);
+      refreshPreview();
+    });
+  }
+
+  testPath.addEventListener("focus", loadSuggestions);
+  document.addEventListener("click", event => {
+    if (!suggestions.contains(event.target) && event.target !== testPath) {
+      suggestions.hidden = true;
+    }
+  });
+  collectButton.addEventListener("click", collectTests);
+  refreshPreview();
+})();
+</script>
 {% endblock %}

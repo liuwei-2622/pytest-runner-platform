@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import zipfile
+from dataclasses import asdict
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request, status as http_status
@@ -11,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .config import ALLOWED_WORKER_VALUES, BASE_DIR
+from .discovery import list_test_target_suggestions
 from .projects import (
     ProjectConfig,
     default_project_id,
@@ -19,7 +21,7 @@ from .projects import (
     list_projects,
     upsert_project,
 )
-from .runner import execute_run
+from .runner import build_preview_command, collect_tests, execute_run, quote_command_for_display
 from .security import validate_env_vars, validate_options, validate_test_path
 from .storage import artifact_path, create_run, get_run, list_runs, read_log_preview
 
@@ -85,6 +87,25 @@ def _zip_directory(directory: str) -> bytes | None:
     return buffer.getvalue()
 
 
+def _validate_run_form(
+    project_id: str,
+    test_path: str,
+    keyword: str,
+    marker: str,
+    verbosity: str,
+    maxfail: str,
+    workers: str,
+    env_vars_text: str,
+):
+    project = get_project(project_id or default_project_id())
+    if not project:
+        raise ValueError("项目不存在")
+    display_path, resolved_path = validate_test_path(project, test_path)
+    options = validate_options(keyword, marker, verbosity, maxfail, workers)
+    options.env_vars = validate_env_vars(env_vars_text)
+    return project, display_path, resolved_path, options
+
+
 @app.get("/")
 async def index(request: Request, project_id: str | None = None):
     projects = list_projects()
@@ -126,12 +147,16 @@ async def create_run_route(
         "env_vars_text": env_vars_text,
     }
     try:
-        project = get_project(selected_project_id)
-        if not project:
-            raise ValueError("项目不存在")
-        display_path, resolved_path = validate_test_path(project, test_path)
-        options = validate_options(keyword, marker, verbosity, maxfail, workers)
-        options.env_vars = validate_env_vars(env_vars_text)
+        project, display_path, resolved_path, options = _validate_run_form(
+            selected_project_id,
+            test_path,
+            keyword,
+            marker,
+            verbosity,
+            maxfail,
+            workers,
+            env_vars_text,
+        )
     except ValueError as exc:
         return templates.TemplateResponse(
             request,
@@ -149,6 +174,89 @@ async def create_run_route(
     run = create_run(project.id, project.name, display_path, resolved_path, options)
     asyncio.create_task(execute_run(run.id))
     return RedirectResponse(url=f"/runs/{run.id}", status_code=http_status.HTTP_303_SEE_OTHER)
+
+
+@app.get("/api/projects/{project_id}/test-targets")
+async def test_targets(project_id: str, q: str = ""):
+    project = get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {
+        "project_id": project.id,
+        "suggestions": list_test_target_suggestions(project, q[:512]),
+    }
+
+
+@app.post("/api/command-preview")
+async def command_preview(
+    project_id: str = Form(""),
+    test_path: str = Form("."),
+    keyword: str = Form(""),
+    marker: str = Form(""),
+    verbosity: str = Form("normal"),
+    maxfail: str = Form(""),
+    workers: str = Form("disabled"),
+    env_vars_text: str = Form(""),
+):
+    try:
+        project, display_path, resolved_path, options = _validate_run_form(
+            project_id,
+            test_path,
+            keyword,
+            marker,
+            verbosity,
+            maxfail,
+            workers,
+            env_vars_text,
+        )
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    command = build_preview_command(project, str(resolved_path), options)
+    return {
+        "ok": True,
+        "command": command,
+        "display_command": quote_command_for_display(command),
+        "test_path": display_path,
+        "warnings": [],
+    }
+
+
+@app.post("/api/collect")
+async def collect_route(
+    project_id: str = Form(""),
+    test_path: str = Form("."),
+    keyword: str = Form(""),
+    marker: str = Form(""),
+    verbosity: str = Form("normal"),
+    maxfail: str = Form(""),
+    workers: str = Form("disabled"),
+    env_vars_text: str = Form(""),
+):
+    try:
+        project, _display_path, resolved_path, options = _validate_run_form(
+            project_id,
+            test_path,
+            keyword,
+            marker,
+            verbosity,
+            maxfail,
+            workers,
+            env_vars_text,
+        )
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "return_code": None,
+            "collected_count": None,
+            "command": [],
+            "display_command": "",
+            "stdout": "",
+            "stderr": "",
+            "timed_out": False,
+        }
+    return await collect_tests(project, resolved_path, options)
 
 
 @app.get("/projects")
@@ -379,6 +487,8 @@ async def run_status(run_id: str):
         "started_at": run.started_at,
         "finished_at": run.finished_at,
         "duration_seconds": run.duration_seconds,
+        "progress": asdict(run.progress),
+        "is_active": run.status in {"queued", "running"},
         "has_allure_results": _directory_has_files(run.allure_results_path),
         "has_allure_report": (Path(run.allure_report_path) / "index.html").exists(),
     }

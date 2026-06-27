@@ -17,9 +17,10 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
-def validate_test_path(project: ProjectConfig, raw_path: str) -> tuple[str, Path]:
+def validate_test_path(project: ProjectConfig, raw_path: str) -> tuple[str, str]:
     value = (raw_path or ".").strip() or "."
-    raw = Path(value)
+    path_value, separator, node_selector = value.partition("::")
+    raw = Path(path_value or ".")
     candidate = raw if raw.is_absolute() else project.root / raw
     resolved = candidate.resolve()
 
@@ -30,7 +31,11 @@ def validate_test_path(project: ProjectConfig, raw_path: str) -> tuple[str, Path
         raise ValueError("测试路径不存在")
 
     display_path = "." if resolved == project.root else str(resolved.relative_to(project.root))
-    return display_path, resolved
+    resolved_target = str(resolved)
+    if separator:
+        display_path = f"{display_path}::{node_selector}"
+        resolved_target = f"{resolved_target}::{node_selector}"
+    return display_path, resolved_target
 
 
 def validate_env_vars(raw: str) -> dict[str, str]:

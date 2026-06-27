@@ -1,0 +1,125 @@
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+from .projects import ProjectConfig
+
+IGNORED_DIRS = {"__pycache__", ".pytest_cache", ".git", ".venv", "venv", "env", "node_modules"}
+MAX_SCAN_FILES = 1000
+MAX_TEST_FILE_BYTES = 256 * 1024
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def _is_allowed(path: Path, allowed_roots: list[Path]) -> bool:
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    return any(_is_relative_to(resolved, root) for root in allowed_roots)
+
+
+def _relative_value(project: ProjectConfig, path: Path) -> str | None:
+    try:
+        return str(path.resolve().relative_to(project.root))
+    except ValueError:
+        return None
+
+
+def _is_test_file(path: Path) -> bool:
+    return path.is_file() and path.suffix == ".py" and (path.name.startswith("test_") or path.name.endswith("_test.py"))
+
+
+def _matches(value: str, label: str, query: str) -> bool:
+    if not query:
+        return True
+    query = query.lower()
+    return query in value.lower() or query in label.lower()
+
+
+def _add_suggestion(
+    suggestions: list[dict],
+    seen: set[str],
+    value: str,
+    label: str,
+    kind: str,
+    query: str,
+    limit: int,
+) -> None:
+    if len(suggestions) >= limit or value in seen or not _matches(value, label, query):
+        return
+    seen.add(value)
+    suggestions.append({"value": value, "label": label, "kind": kind})
+
+
+def _nodeid_suggestions(path: Path, relative_path: str) -> list[dict]:
+    try:
+        if path.stat().st_size > MAX_TEST_FILE_BYTES:
+            return []
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+    except (OSError, SyntaxError, UnicodeError):
+        return []
+
+    suggestions: list[dict] = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+            suggestions.append({
+                "value": f"{relative_path}::{node.name}",
+                "label": node.name,
+                "kind": "test",
+            })
+        elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+            for child in node.body:
+                if isinstance(child, ast.FunctionDef) and child.name.startswith("test_"):
+                    suggestions.append({
+                        "value": f"{relative_path}::{node.name}::{child.name}",
+                        "label": f"{node.name}::{child.name}",
+                        "kind": "test",
+                    })
+    return suggestions
+
+
+def list_test_target_suggestions(project: ProjectConfig, query: str = "", limit: int = 50) -> list[dict]:
+    query = query.strip()[:512]
+    allowed_roots = project.allowed_roots
+    suggestions: list[dict] = []
+    seen: set[str] = set()
+    scanned_files = 0
+
+    for allowed_root in allowed_roots:
+        if not _is_allowed(allowed_root, allowed_roots) or not allowed_root.exists():
+            continue
+        for path in allowed_root.rglob("*"):
+            if len(suggestions) >= limit or scanned_files >= MAX_SCAN_FILES:
+                break
+            if path.name in IGNORED_DIRS:
+                continue
+            if path.is_dir():
+                if not _is_allowed(path, allowed_roots):
+                    continue
+                relative = _relative_value(project, path)
+                if relative:
+                    _add_suggestion(suggestions, seen, relative, f"{relative}/", "directory", query, limit)
+                continue
+            if not _is_test_file(path) or not _is_allowed(path, allowed_roots):
+                continue
+            scanned_files += 1
+            relative = _relative_value(project, path)
+            if not relative:
+                continue
+            _add_suggestion(suggestions, seen, relative, relative, "file", query, limit)
+            for suggestion in _nodeid_suggestions(path, relative):
+                _add_suggestion(
+                    suggestions,
+                    seen,
+                    suggestion["value"],
+                    suggestion["label"],
+                    suggestion["kind"],
+                    query,
+                    limit,
+                )
+
+    return suggestions

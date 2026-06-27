@@ -227,3 +227,129 @@ input[readonly] {
   background: #f3f4f6;
   color: #6b7280;
 }
+
+.progress-panel {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  margin: 18px 0;
+  padding: 18px;
+}
+
+.progress-header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.progress-header h2 {
+  margin: 0;
+}
+
+#progress-label {
+  color: #2563eb;
+  font-weight: 800;
+}
+
+.progress-bar {
+  background: #e5e7eb;
+  border-radius: 999px;
+  height: 12px;
+  margin: 14px 0;
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  background: linear-gradient(90deg, #2563eb, #22c55e);
+  border-radius: 999px;
+  height: 100%;
+  transition: width 0.25s ease;
+}
+
+.progress-stats {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+}
+
+.progress-stat {
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.progress-value {
+  display: block;
+  font-size: 24px;
+  font-weight: 800;
+}
+
+.progress-value.success {
+  color: #16a34a;
+}
+
+.progress-value.danger {
+  color: #dc2626;
+}
+
+.target-field {
+  position: relative;
+}
+
+.suggestions {
+  background: white;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.12);
+  left: 0;
+  max-height: 280px;
+  overflow: auto;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 20;
+}
+
+.suggestion-item {
+  align-items: center;
+  background: white;
+  border: 0;
+  border-bottom: 1px solid #f3f4f6;
+  color: #1f2937;
+  display: flex;
+  justify-content: space-between;
+  padding: 10px 12px;
+  text-align: left;
+  width: 100%;
+}
+
+.suggestion-item:hover {
+  background: #eff6ff;
+}
+
+.suggestion-kind {
+  color: #6b7280;
+  font-size: 12px;
+  margin-left: 12px;
+  text-transform: uppercase;
+}
+
+.command-preview,
+.collect-panel {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.status-ok {
+  color: #16a34a;
+  font-weight: 700;
+}
+
+.status-error {
+  color: #dc2626;
+  font-weight: 700;
+}

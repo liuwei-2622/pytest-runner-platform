@@ -1,29 +1,50 @@
 {% extends "base.html" %}
 {% block title %}运行 {{ run.id }} - pytest-runner-platform{% endblock %}
-{% block head %}
-  {% if run.status in ['queued', 'running'] %}
-    <meta http-equiv="refresh" content="3">
-  {% endif %}
-{% endblock %}
+{% block head %}{% endblock %}
 {% block content %}
 <section class="card">
   <div class="section-title">
     <h1>运行 <code>{{ run.id }}</code></h1>
-    <span class="badge badge-{{ run.status }}">{{ run.status }}</span>
+    <span id="run-status" class="badge badge-{{ run.status }}">{{ run.status }}</span>
   </div>
 
   {% if run.error_message %}
     <div class="alert">{{ run.error_message }}</div>
   {% endif %}
 
+  <section class="progress-panel" aria-label="运行进度">
+    <div class="progress-header">
+      <h2>运行进度</h2>
+      <span id="progress-label">
+        {% if run.progress.percent is not none %}
+          {{ run.progress.percent }}%
+        {% elif run.status == 'queued' %}
+          等待开始...
+        {% else %}
+          正在收集测试...
+        {% endif %}
+      </span>
+    </div>
+    <div class="progress-bar" aria-hidden="true">
+      <div id="progress-bar-fill" class="progress-bar-fill" style="width: {{ run.progress.percent or 0 }}%"></div>
+    </div>
+    <div class="progress-stats">
+      <div class="progress-stat"><span class="progress-value" id="progress-completed">{{ run.progress.completed }}</span><span>已完成</span></div>
+      <div class="progress-stat"><span class="progress-value" id="progress-collected">{{ run.progress.collected if run.progress.collected is not none else '?' }}</span><span>总数</span></div>
+      <div class="progress-stat"><span class="progress-value success" id="progress-passed">{{ run.progress.passed }}</span><span>通过</span></div>
+      <div class="progress-stat"><span class="progress-value danger" id="progress-failed">{{ run.progress.failed + run.progress.errors }}</span><span>失败</span></div>
+      <div class="progress-stat"><span class="progress-value" id="progress-skipped">{{ run.progress.skipped }}</span><span>跳过</span></div>
+    </div>
+  </section>
+
   <dl class="details">
     <dt>项目</dt><dd>{{ run.project_name }} <span class="muted">({{ run.project_id }})</span></dd>
     <dt>测试路径</dt><dd><code>{{ run.test_path }}</code></dd>
     <dt>创建时间</dt><dd>{{ run.created_at }}</dd>
-    <dt>开始时间</dt><dd>{{ run.started_at or '-' }}</dd>
-    <dt>结束时间</dt><dd>{{ run.finished_at or '-' }}</dd>
-    <dt>耗时</dt><dd>{{ run.duration_seconds if run.duration_seconds is not none else '-' }}s</dd>
-    <dt>返回码</dt><dd>{{ run.return_code if run.return_code is not none else '-' }}</dd>
+    <dt>开始时间</dt><dd id="run-started-at">{{ run.started_at or '-' }}</dd>
+    <dt>结束时间</dt><dd id="run-finished-at">{{ run.finished_at or '-' }}</dd>
+    <dt>耗时</dt><dd id="run-duration">{% if run.duration_seconds is not none %}{{ run.duration_seconds }}s{% else %}-{% endif %}</dd>
+    <dt>返回码</dt><dd id="run-return-code">{{ run.return_code if run.return_code is not none else '-' }}</dd>
     <dt>xdist</dt><dd>{{ run.options.workers }}</dd>
     {% if project %}
       <dt>工作目录</dt><dd><code>{{ project.working_directory }}</code></dd>
@@ -66,4 +87,72 @@
   <h2>stderr 预览</h2>
   <pre class="log">{{ stderr_preview or '暂无 stderr。' }}</pre>
 </section>
+
+<script>
+(() => {
+  const runId = {{ run.id | tojson }};
+  const statusBadge = document.getElementById("run-status");
+  const progressLabel = document.getElementById("progress-label");
+  const progressFill = document.getElementById("progress-bar-fill");
+  const completed = document.getElementById("progress-completed");
+  const collected = document.getElementById("progress-collected");
+  const passed = document.getElementById("progress-passed");
+  const failed = document.getElementById("progress-failed");
+  const skipped = document.getElementById("progress-skipped");
+  const startedAt = document.getElementById("run-started-at");
+  const finishedAt = document.getElementById("run-finished-at");
+  const duration = document.getElementById("run-duration");
+  const returnCode = document.getElementById("run-return-code");
+  let reloaded = false;
+
+  function setText(element, value) {
+    if (element) element.textContent = value;
+  }
+
+  function updateProgress(progress) {
+    const percent = progress.percent ?? 0;
+    progressFill.style.width = `${percent}%`;
+    if (progress.percent === null || progress.percent === undefined) {
+      progressLabel.textContent = progress.collected === null || progress.collected === undefined ? "正在收集测试..." : "0%";
+    } else {
+      progressLabel.textContent = `${progress.percent}%`;
+    }
+    setText(completed, progress.completed ?? 0);
+    setText(collected, progress.collected ?? "?");
+    setText(passed, progress.passed ?? 0);
+    setText(failed, (progress.failed ?? 0) + (progress.errors ?? 0));
+    setText(skipped, progress.skipped ?? 0);
+  }
+
+  async function poll() {
+    const response = await fetch(`/api/runs/${runId}`, {headers: {"Accept": "application/json"}});
+    if (!response.ok) return;
+    const data = await response.json();
+    statusBadge.textContent = data.status;
+    statusBadge.className = `badge badge-${data.status}`;
+    setText(startedAt, data.started_at || "-");
+    setText(finishedAt, data.finished_at || "-");
+    setText(duration, data.duration_seconds === null || data.duration_seconds === undefined ? "-" : `${data.duration_seconds}s`);
+    setText(returnCode, data.return_code === null || data.return_code === undefined ? "-" : data.return_code);
+    updateProgress(data.progress || {});
+
+    if (!data.is_active && !reloaded) {
+      reloaded = true;
+      window.setTimeout(() => window.location.reload(), 800);
+    }
+  }
+
+  if (["queued", "running"].includes(statusBadge.textContent.trim())) {
+    poll();
+    const timer = window.setInterval(async () => {
+      try {
+        await poll();
+        if (reloaded) window.clearInterval(timer);
+      } catch (error) {
+        console.warn("run progress polling failed", error);
+      }
+    }, 1000);
+  }
+})();
+</script>
 {% endblock %}

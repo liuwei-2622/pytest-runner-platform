@@ -6,7 +6,7 @@ from pathlib import Path
 from threading import Lock
 
 from .config import MAX_LOG_PREVIEW_BYTES, REPORTS_DIR
-from .models import RunOptions, TestRun, utc_now
+from .models import RunOptions, RunProgress, TestRun, utc_now
 
 _lock = Lock()
 
@@ -81,6 +81,10 @@ def update_run(run_id: str, **changes) -> TestRun:
             setattr(run, key, value)
         _write_run(run)
         return run
+
+
+def update_run_progress(run_id: str, progress: RunProgress) -> TestRun:
+    return update_run(run_id, progress=progress)
 
 
 def list_runs() -> list[TestRun]:

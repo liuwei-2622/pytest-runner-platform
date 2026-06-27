@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -33,6 +33,36 @@ class RunOptions:
 
 
 @dataclass
+class RunProgress:
+    collected: int | None = None
+    completed: int = 0
+    passed: int = 0
+    failed: int = 0
+    skipped: int = 0
+    errors: int = 0
+    xfailed: int = 0
+    xpassed: int = 0
+    percent: float | None = None
+    updated_at: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> "RunProgress":
+        data = data or {}
+        return cls(
+            collected=data.get("collected"),
+            completed=data.get("completed", 0),
+            passed=data.get("passed", 0),
+            failed=data.get("failed", 0),
+            skipped=data.get("skipped", 0),
+            errors=data.get("errors", 0),
+            xfailed=data.get("xfailed", 0),
+            xpassed=data.get("xpassed", 0),
+            percent=data.get("percent"),
+            updated_at=data.get("updated_at"),
+        )
+
+
+@dataclass
 class TestRun:
     id: str
     status: RunStatus
@@ -54,22 +84,26 @@ class TestRun:
     project_id: str = "sample"
     project_name: str = "Sample Workspace"
     error_message: str = ""
+    progress: RunProgress = field(default_factory=RunProgress)
 
     def to_dict(self) -> dict:
         data = asdict(self)
         data["options"] = asdict(self.options)
+        data["progress"] = asdict(self.progress)
         return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "TestRun":
         data = dict(data)
         data["options"] = RunOptions.from_dict(data.get("options", {}))
+        data["progress"] = RunProgress.from_dict(data.get("progress"))
         data.setdefault("allure_results_path", "")
         data.setdefault("allure_report_path", "")
         data.setdefault("project_id", "sample")
         data.setdefault("project_name", "Sample Workspace")
         data.setdefault("error_message", "")
-        return cls(**data)
+        allowed_fields = {item.name for item in fields(cls)}
+        return cls(**{key: value for key, value in data.items() if key in allowed_fields})
 
     @property
     def duration_seconds(self) -> float | None:
