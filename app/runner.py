@@ -64,6 +64,12 @@ def build_pytest_args(
         command.append(f"--maxfail={options.maxfail}")
     if options.workers != "disabled":
         command.extend(["-n", options.workers])
+    if options.last_failed:
+        command.append("--lf")
+    if options.failed_first:
+        command.append("--ff")
+    if options.tb != "auto":
+        command.append(f"--tb={options.tb}")
 
     return command
 

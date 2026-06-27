@@ -17,6 +17,31 @@
         {% endfor %}
       </select>
     </label>
+
+    <section class="template-panel">
+      <div class="section-title">
+        <h2>参数模板</h2>
+        <span id="template_status" class="muted">选择项目后加载模板。</span>
+      </div>
+      <div class="grid">
+        <label>
+          已保存模板
+          <select id="template_select">
+            <option value="">暂无模板</option>
+          </select>
+        </label>
+        <label>
+          新模板名称
+          <input id="template_name" name="template_name" placeholder="例如 smoke + short traceback">
+        </label>
+      </div>
+      <div class="actions">
+        <button type="button" id="apply_template_button" class="button-secondary">应用模板</button>
+        <button type="button" id="save_template_button" class="button-secondary">保存为模板</button>
+        <button type="button" id="delete_template_button" class="link-button">删除模板</button>
+      </div>
+    </section>
+
     <label class="target-field">
       测试目标
       <input id="test_path" name="test_path" value="{{ form.get('test_path', '.') }}" placeholder="例如 .、tests、tests/test_api.py::test_login" autocomplete="off" required>
@@ -34,6 +59,13 @@
       本次运行环境变量
       <textarea id="env_vars_text" name="env_vars_text" rows="6" placeholder="可选，每行一个 KEY=value&#10;API_BASE_URL=http://127.0.0.1:8000&#10;TOKEN=secret">{{ form.get('env_vars_text', '') }}</textarea>
     </label>
+    <div class="env-validation-panel" aria-live="polite">
+      <div class="section-title">
+        <span class="muted">环境变量检查</span>
+        <span id="env_validation_status" class="muted">等待输入...</span>
+      </div>
+      <div id="env_highlight" class="env-highlight"></div>
+    </div>
     <div class="grid">
       <label>
         输出级别
@@ -50,10 +82,29 @@
       </label>
       <label>
         xdist 并行
-        <select id="workers" name="workers">
-          {% set selected_workers = form.get('workers', 'disabled') %}
+        <input id="workers" name="workers" value="{{ form.get('workers', 'disabled') }}" list="worker_options" placeholder="disabled、auto 或进程数">
+        <datalist id="worker_options">
           {% for value in worker_values %}
-            <option value="{{ value }}" {% if selected_workers == value %}selected{% endif %}>{{ value }}</option>
+            <option value="{{ value }}"></option>
+          {% endfor %}
+        </datalist>
+      </label>
+    </div>
+    <div class="grid option-grid">
+      <label class="checkbox-label">
+        <input id="last_failed" name="last_failed" type="checkbox" value="true" {% if form.get('last_failed') %}checked{% endif %}>
+        只运行上次失败 (--lf)
+      </label>
+      <label class="checkbox-label">
+        <input id="failed_first" name="failed_first" type="checkbox" value="true" {% if form.get('failed_first') %}checked{% endif %}>
+        失败用例优先 (--ff)
+      </label>
+      <label>
+        traceback 样式
+        <select id="tb" name="tb">
+          {% set selected_tb = form.get('tb', 'auto') %}
+          {% for value in tb_values %}
+            <option value="{{ value }}" {% if selected_tb == value %}selected{% endif %}>{{ value }}</option>
           {% endfor %}
         </select>
       </label>
@@ -90,8 +141,19 @@
   const collectButton = document.getElementById("collect_button");
   const collectStatus = document.getElementById("collect_status");
   const collectOutput = document.getElementById("collect_output");
+  const envVarsText = document.getElementById("env_vars_text");
+  const envValidationStatus = document.getElementById("env_validation_status");
+  const envHighlight = document.getElementById("env_highlight");
+  const templateSelect = document.getElementById("template_select");
+  const templateName = document.getElementById("template_name");
+  const templateStatus = document.getElementById("template_status");
+  const applyTemplateButton = document.getElementById("apply_template_button");
+  const saveTemplateButton = document.getElementById("save_template_button");
+  const deleteTemplateButton = document.getElementById("delete_template_button");
+  const templateById = new Map();
   let suggestionTimer;
   let previewTimer;
+  let envValidationTimer;
 
   function debounce(callback, delay, currentTimerSetter) {
     currentTimerSetter(window.setTimeout(callback, delay));
@@ -107,6 +169,176 @@
     element.classList.toggle("status-error", ok === false);
   }
 
+  function setField(id, value) {
+    const element = document.getElementById(id);
+    if (element) element.value = value ?? "";
+  }
+
+  function responseError(result, fallback) {
+    if (result?.error) return result.error;
+    if (result?.detail) return typeof result.detail === "string" ? result.detail : JSON.stringify(result.detail);
+    return fallback;
+  }
+
+  function setChecked(id, value) {
+    const element = document.getElementById(id);
+    if (element) element.checked = Boolean(value);
+  }
+
+  function appendEnvText(parent, text, className) {
+    const element = document.createElement("span");
+    element.className = className;
+    element.textContent = text;
+    parent.appendChild(element);
+  }
+
+  function renderEnvValidation(data) {
+    envHighlight.innerHTML = "";
+    for (const line of data.lines || []) {
+      const row = document.createElement("div");
+      row.className = `env-line env-line-${line.state}`;
+
+      const number = document.createElement("span");
+      number.className = "env-line-number";
+      number.textContent = line.line;
+
+      const content = document.createElement("span");
+      content.className = "env-line-content";
+      if (line.state === "valid") {
+        appendEnvText(content, line.key, "env-token-key");
+        appendEnvText(content, "=", "env-token-equals");
+        appendEnvText(content, line.value ? "******" : "", "env-token-value");
+      } else {
+        content.textContent = line.raw || "";
+      }
+
+      const message = document.createElement("span");
+      message.className = "env-line-message";
+      message.textContent = line.message || "";
+
+      row.append(number, content, message);
+      envHighlight.appendChild(row);
+    }
+
+    if (data.ok) {
+      setStatus(envValidationStatus, `有效：${Object.keys(data.env_vars || {}).length} 个变量`, true);
+    } else {
+      setStatus(envValidationStatus, `发现 ${(data.issues || []).length} 个问题`, false);
+    }
+  }
+
+  async function validateEnvVars() {
+    const data = new FormData();
+    data.set("env_vars_text", envVarsText.value);
+    try {
+      const response = await fetch("/api/env-vars/validate", {
+        method: "POST",
+        body: data,
+        headers: {"Accept": "application/json"},
+      });
+      renderEnvValidation(await response.json());
+    } catch (error) {
+      setStatus(envValidationStatus, `检查失败：${error}`, false);
+    }
+  }
+
+  async function loadTemplates() {
+    const response = await fetch(`/api/run-templates?project_id=${encodeURIComponent(project.value)}`, {headers: {"Accept": "application/json"}});
+    if (!response.ok) return;
+    const data = await response.json();
+    templateById.clear();
+    templateSelect.innerHTML = "";
+    if (!data.templates.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "暂无模板";
+      templateSelect.appendChild(option);
+      setStatus(templateStatus, "当前项目暂无模板。", null);
+      return;
+    }
+    for (const template of data.templates) {
+      templateById.set(template.id, template);
+      const option = document.createElement("option");
+      option.value = template.id;
+      option.textContent = template.name;
+      templateSelect.appendChild(option);
+    }
+    setStatus(templateStatus, `已加载 ${data.templates.length} 个模板。`, true);
+  }
+
+  function applyTemplate() {
+    const template = templateById.get(templateSelect.value);
+    if (!template) {
+      setStatus(templateStatus, "请先选择模板。", false);
+      return;
+    }
+    const options = template.options || {};
+    testPath.value = template.test_path || ".";
+    setField("keyword", options.keyword || "");
+    setField("marker", options.marker || "");
+    setField("verbosity", options.verbosity || "normal");
+    setField("maxfail", options.maxfail ?? "");
+    setField("workers", options.workers || "disabled");
+    setChecked("last_failed", options.last_failed);
+    setChecked("failed_first", options.failed_first);
+    setField("tb", options.tb || "auto");
+    setField("env_vars_text", (options.env_var_keys || []).map(key => `${key}=`).join("\n"));
+    setStatus(templateStatus, "模板已应用，请补充环境变量值后运行。", true);
+    validateEnvVars();
+    refreshPreview();
+  }
+
+  async function saveTemplate() {
+    const data = formData();
+    data.set("template_name", templateName.value);
+    saveTemplateButton.disabled = true;
+    try {
+      const response = await fetch("/api/run-templates", {
+        method: "POST",
+        body: data,
+        headers: {"Accept": "application/json"},
+      });
+      const result = await response.json();
+      if (!response.ok || !result.ok) {
+        setStatus(templateStatus, `保存失败：${responseError(result, "请重启服务后重试")}`, false);
+        return;
+      }
+      setStatus(templateStatus, "模板已保存。", true);
+      templateName.value = "";
+      await loadTemplates();
+      templateSelect.value = result.template.id;
+    } catch (error) {
+      setStatus(templateStatus, `保存失败：${error}`, false);
+    } finally {
+      saveTemplateButton.disabled = false;
+    }
+  }
+
+  async function deleteTemplate() {
+    if (!templateSelect.value) {
+      setStatus(templateStatus, "请先选择模板。", false);
+      return;
+    }
+    deleteTemplateButton.disabled = true;
+    try {
+      const response = await fetch(`/api/run-templates/${encodeURIComponent(templateSelect.value)}`, {
+        method: "DELETE",
+        headers: {"Accept": "application/json"},
+      });
+      if (!response.ok) {
+        const result = await response.json();
+        setStatus(templateStatus, `删除失败：${responseError(result, "请重启服务后重试")}`, false);
+        return;
+      }
+      setStatus(templateStatus, "模板已删除。", true);
+      await loadTemplates();
+    } catch (error) {
+      setStatus(templateStatus, `删除失败：${error}`, false);
+    } finally {
+      deleteTemplateButton.disabled = false;
+    }
+  }
+
   async function loadSuggestions() {
     const response = await fetch(`/api/projects/${encodeURIComponent(project.value)}/test-targets?q=${encodeURIComponent(testPath.value)}`);
     if (!response.ok) return;
@@ -118,9 +350,14 @@
     }
     for (const item of data.suggestions) {
       const button = document.createElement("button");
+      const value = document.createElement("span");
+      const kind = document.createElement("span");
       button.type = "button";
       button.className = "suggestion-item";
-      button.innerHTML = `<span>${item.value}</span><span class="suggestion-kind">${item.kind}</span>`;
+      value.textContent = item.value;
+      kind.className = "suggestion-kind";
+      kind.textContent = item.kind;
+      button.append(value, kind);
       button.addEventListener("click", () => {
         testPath.value = item.value;
         suggestions.hidden = true;
@@ -174,6 +411,11 @@
     }
   }
 
+  project.addEventListener("change", () => {
+    loadTemplates();
+    loadSuggestions();
+  });
+
   testPath.addEventListener("input", () => {
     window.clearTimeout(suggestionTimer);
     window.clearTimeout(previewTimer);
@@ -182,10 +424,14 @@
   });
 
   for (const element of form.querySelectorAll("input, select, textarea")) {
-    if (element === testPath) continue;
+    if (element === testPath || element === templateName || element === templateSelect) continue;
     element.addEventListener("input", () => {
       window.clearTimeout(previewTimer);
       debounce(refreshPreview, 250, timer => previewTimer = timer);
+      if (element === envVarsText) {
+        window.clearTimeout(envValidationTimer);
+        debounce(validateEnvVars, 150, timer => envValidationTimer = timer);
+      }
     });
     element.addEventListener("change", () => {
       window.clearTimeout(previewTimer);
@@ -199,7 +445,12 @@
       suggestions.hidden = true;
     }
   });
+  applyTemplateButton.addEventListener("click", applyTemplate);
+  saveTemplateButton.addEventListener("click", saveTemplate);
+  deleteTemplateButton.addEventListener("click", deleteTemplate);
   collectButton.addEventListener("click", collectTests);
+  loadTemplates();
+  validateEnvVars();
   refreshPreview();
 })();
 </script>

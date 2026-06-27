@@ -19,6 +19,10 @@ class RunOptions:
     maxfail: int | None = None
     workers: str = "disabled"
     env_vars: dict[str, str] = field(default_factory=dict)
+    last_failed: bool = False
+    failed_first: bool = False
+    tb: str = "auto"
+    env_var_keys: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict) -> "RunOptions":
@@ -29,6 +33,38 @@ class RunOptions:
             maxfail=data.get("maxfail"),
             workers=data.get("workers", "disabled"),
             env_vars=data.get("env_vars", {}),
+            last_failed=data.get("last_failed", False),
+            failed_first=data.get("failed_first", False),
+            tb=data.get("tb", "auto"),
+            env_var_keys=list(data.get("env_var_keys", [])),
+        )
+
+
+@dataclass
+class RunTemplate:
+    id: str
+    project_id: str
+    name: str
+    test_path: str
+    options: RunOptions
+    created_at: str
+    updated_at: str
+
+    def to_dict(self) -> dict:
+        data = asdict(self)
+        data["options"] = asdict(self.options)
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "RunTemplate":
+        return cls(
+            id=data.get("id", ""),
+            project_id=data.get("project_id", ""),
+            name=data.get("name", ""),
+            test_path=data.get("test_path", ""),
+            options=RunOptions.from_dict(data.get("options", {})),
+            created_at=data.get("created_at", ""),
+            updated_at=data.get("updated_at", ""),
         )
 
 

@@ -46,6 +46,9 @@
     <dt>耗时</dt><dd id="run-duration">{% if run.duration_seconds is not none %}{{ run.duration_seconds }}s{% else %}-{% endif %}</dd>
     <dt>返回码</dt><dd id="run-return-code">{{ run.return_code if run.return_code is not none else '-' }}</dd>
     <dt>xdist</dt><dd>{{ run.options.workers }}</dd>
+    <dt>--lf</dt><dd>{% if run.options.last_failed %}启用{% else %}未启用{% endif %}</dd>
+    <dt>--ff</dt><dd>{% if run.options.failed_first %}启用{% else %}未启用{% endif %}</dd>
+    <dt>--tb</dt><dd>{{ run.options.tb }}</dd>
     {% if project %}
       <dt>工作目录</dt><dd><code>{{ project.working_directory }}</code></dd>
       <dt>Python</dt><dd><code>{{ project.python_executable }}</code></dd>
@@ -65,6 +68,76 @@
     <pre class="code">{{ run.command | join(' ') }}</pre>
   {% else %}
     <p class="muted">任务仍在队列中。</p>
+  {% endif %}
+
+  <h2>测试报告摘要</h2>
+  {% if report.exists and not report.error_message %}
+    <div class="summary-grid">
+      <div class="summary-card"><span class="summary-value">{{ report.total }}</span><span>总数</span></div>
+      <div class="summary-card"><span class="summary-value success">{{ report.passed }}</span><span>通过</span></div>
+      <div class="summary-card"><span class="summary-value danger">{{ report.failed + report.errors }}</span><span>失败/错误</span></div>
+      <div class="summary-card"><span class="summary-value">{{ report.skipped }}</span><span>跳过</span></div>
+      <div class="summary-card"><span class="summary-value">{{ report.time_seconds }}</span><span>秒</span></div>
+    </div>
+
+    {% if report.failed_cases %}
+      <h3>失败与错误用例</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>结果</th>
+            <th>用例</th>
+            <th>耗时</th>
+            <th>信息</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for case in report.failed_cases %}
+            <tr>
+              <td><span class="badge badge-{{ 'failed' if case.outcome == 'failed' else 'error' }}">{{ case.outcome }}</span></td>
+              <td>
+                <code>{{ case.classname }}::{{ case.name }}</code>
+                {% if case.file %}<div class="muted">{{ case.file }}{% if case.line %}:{{ case.line }}{% endif %}</div>{% endif %}
+              </td>
+              <td>{{ case.time_seconds }}s</td>
+              <td>
+                <div>{{ case.message or '-' }}</div>
+                {% if case.details %}<pre class="log compact-log">{{ case.details }}</pre>{% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="muted">没有失败或错误用例。</p>
+    {% endif %}
+
+    {% if report.skipped_cases %}
+      <h3>跳过用例</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>用例</th>
+            <th>原因</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for case in report.skipped_cases[:20] %}
+            <tr>
+              <td><code>{{ case.classname }}::{{ case.name }}</code></td>
+              <td>{{ case.message or case.details or '-' }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% if report.skipped_cases|length > 20 %}
+        <p class="muted">仅显示前 20 个跳过用例。</p>
+      {% endif %}
+    {% endif %}
+  {% elif report.error_message %}
+    <div class="alert">{{ report.error_message }}</div>
+  {% else %}
+    <p class="muted">暂无可解析的 JUnit XML。运行完成后会在这里显示集成报告摘要。</p>
   {% endif %}
 
   <h2>报告与日志</h2>

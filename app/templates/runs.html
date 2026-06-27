@@ -6,7 +6,63 @@
     <h1>运行记录</h1>
     <a class="button-secondary" href="/">新建运行</a>
   </div>
+
+  <section class="history-summary">
+    <div class="summary-grid">
+      <div class="summary-card"><span class="summary-value">{{ history.total_runs }}</span><span>总运行数</span></div>
+      <div class="summary-card"><span class="summary-value">{{ history.completed_runs }}</span><span>已完成</span></div>
+      <div class="summary-card">
+        <span class="summary-value {% if history.pass_rate is not none and history.pass_rate >= 80 %}success{% elif history.pass_rate is not none %}danger{% endif %}">
+          {{ history.pass_rate if history.pass_rate is not none else '-' }}{% if history.pass_rate is not none %}%{% endif %}
+        </span>
+        <span>通过率</span>
+      </div>
+      <div class="summary-card"><span class="summary-value">{{ history.average_duration_seconds if history.average_duration_seconds is not none else '-' }}</span><span>平均耗时秒</span></div>
+    </div>
+
+    {% if history.trend_points %}
+      <h2>最近运行趋势</h2>
+      <div class="trend-list">
+        {% for point in history.trend_points %}
+          {% set duration = point.duration_seconds or 0 %}
+          {% set height = [8, [60, duration]|min]|max %}
+          <a class="trend-point trend-{{ point.status }}" href="/runs/{{ point.run_id }}" title="{{ point.created_at }} {{ point.status }} {{ duration }}s">
+            <span class="trend-bar" style="height: {{ height }}px"></span>
+            <span class="trend-label">{{ point.status }}</span>
+          </a>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    {% if history.recent_failures %}
+      <h2>最近失败</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>项目</th>
+            <th>路径</th>
+            <th>状态</th>
+            <th>创建时间</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for run in history.recent_failures %}
+            <tr>
+              <td><a href="/runs/{{ run.id }}"><code>{{ run.id }}</code></a></td>
+              <td>{{ run.project_name }} <span class="muted">({{ run.project_id }})</span></td>
+              <td><code>{{ run.test_path }}</code></td>
+              <td><span class="badge badge-{{ run.status }}">{{ run.status }}</span></td>
+              <td>{{ run.created_at }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  </section>
+
   {% if runs %}
+    <h2>全部运行</h2>
     <table>
       <thead>
         <tr>
@@ -27,7 +83,7 @@
             <td><span class="badge badge-{{ run.status }}">{{ run.status }}</span></td>
             <td><code>{{ run.test_path }}</code></td>
             <td>{{ run.created_at }}</td>
-            <td>{{ run.duration_seconds if run.duration_seconds is not none else '-' }}s</td>
+            <td>{% if run.duration_seconds is not none %}{{ run.duration_seconds }}s{% else %}-{% endif %}</td>
             <td>{{ run.return_code if run.return_code is not none else '-' }}</td>
           </tr>
         {% endfor %}

@@ -10,7 +10,9 @@
 - 支持 pytest `-k` 关键字表达式
 - 支持 pytest `-m` marker 表达式
 - 支持最大失败数 `--maxfail`
-- 支持 pytest-xdist 并行运行
+- 支持 pytest-xdist 并行运行，可填写 `auto` 或自定义进程数
+- 支持 `--lf`、`--ff`、`--tb` 常用 pytest 选项
+- 支持保存常用参数组合为模板
 - 自动生成 pytest HTML 报告
 - 自动生成 JUnit XML 报告
 - 自动生成 Allure Results
@@ -85,10 +87,34 @@ TOKEN=<your-token>
 
 后面的值会覆盖前面的值。
 
+## 参数模板
+
+首页可以将当前测试目标、过滤条件、并行配置和常用 pytest 选项保存为参数模板。模板按项目区分，应用模板后会回填表单。
+
+模板不会保存环境变量的值，只会保存环境变量名称。应用模板时会生成类似下面的空值占位，实际值需要在运行前重新填写：
+
+```text
+API_BASE_URL=
+TOKEN=
+```
+
+## 常用 pytest 选项
+
+- `workers`：填写 `disabled` 表示不启用 xdist，填写 `auto` 表示让 xdist 自动选择，也可以填写自定义正整数进程数。
+- `PYTEST_PLATFORM_MAX_WORKERS`：限制允许填写的最大 xdist 进程数，默认 `128`。
+- `--lf`：只运行上次失败的用例。
+- `--ff`：优先运行上次失败的用例。
+- `--tb`：可选择 `auto`、`long`、`short`、`line`、`native`、`no`。
+
+## 环境变量校验
+
+运行表单支持每行一个 `KEY=value`，页面会实时展示行级校验和高亮。高亮预览会隐藏环境变量值，只显示变量名和 `******`。
+
 ## 报告与日志
 
 每次运行完成后，可以在运行详情页查看：
 
+- 集成测试报告摘要
 - pytest HTML 报告
 - JUnit XML
 - Allure 报告
@@ -96,11 +122,17 @@ TOKEN=<your-token>
 - stdout
 - stderr
 
+详情页会解析本次运行生成的 `junit.xml`，直接展示总数、通过、失败/错误、跳过、耗时，以及失败/错误用例明细。原始报告和日志链接仍然保留。
+
 报告文件默认保存在：
 
 ```text
 /Users/mac/Documents/pytest/reports/<run_id>/
 ```
+
+## 运行历史与趋势
+
+运行记录页会基于本地 `reports/<run_id>/metadata.json` 和进度信息展示总运行数、通过率、平均耗时、最近运行趋势和最近失败记录。当前实现为本地文件解析，不依赖数据库。
 
 ## Allure 支持
 

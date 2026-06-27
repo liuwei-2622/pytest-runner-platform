@@ -5,14 +5,17 @@ import io
 import zipfile
 from dataclasses import asdict
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import FastAPI, Form, HTTPException, Request, status as http_status
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .config import ALLOWED_WORKER_VALUES, BASE_DIR
+from .config import ALLOWED_TB_VALUES, BASE_DIR
 from .discovery import list_test_target_suggestions
+from .history import build_history_summary
+from .models import RunTemplate, utc_now
 from .projects import (
     ProjectConfig,
     default_project_id,
@@ -21,15 +24,17 @@ from .projects import (
     list_projects,
     upsert_project,
 )
+from .reports import report_for_run
+from .run_templates import delete_run_template, list_run_templates, save_run_template
 from .runner import build_preview_command, collect_tests, execute_run, quote_command_for_display
-from .security import validate_env_vars, validate_options, validate_test_path
+from .security import env_var_keys_from_text, validate_env_vars, validate_env_vars_detailed, validate_options, validate_test_path
 from .storage import artifact_path, create_run, get_run, list_runs, read_log_preview
 
 app = FastAPI(title="pytest-runner-platform")
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "app/static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "app/templates"))
 WORKER_VALUES = ["disabled", "auto", "1", "2", "4", "8"]
-WORKER_VALUES = [value for value in WORKER_VALUES if value in ALLOWED_WORKER_VALUES]
+TB_VALUES = [value for value in ["auto", "long", "short", "line", "native", "no"] if value in ALLOWED_TB_VALUES]
 
 
 def _project_form(project: ProjectConfig | None = None) -> dict:
@@ -96,14 +101,23 @@ def _validate_run_form(
     maxfail: str,
     workers: str,
     env_vars_text: str,
+    last_failed: bool | str = False,
+    failed_first: bool | str = False,
+    tb: str = "auto",
 ):
     project = get_project(project_id or default_project_id())
     if not project:
         raise ValueError("项目不存在")
     display_path, resolved_path = validate_test_path(project, test_path)
-    options = validate_options(keyword, marker, verbosity, maxfail, workers)
+    options = validate_options(keyword, marker, verbosity, maxfail, workers, last_failed, failed_first, tb)
     options.env_vars = validate_env_vars(env_vars_text)
     return project, display_path, resolved_path, options
+
+
+def _template_payload(template: RunTemplate) -> dict:
+    data = template.to_dict()
+    data["options"].pop("env_vars", None)
+    return data
 
 
 @app.get("/")
@@ -117,6 +131,7 @@ async def index(request: Request, project_id: str | None = None):
             "projects": projects,
             "selected_project_id": selected_project_id,
             "worker_values": WORKER_VALUES,
+            "tb_values": TB_VALUES,
             "form": {"project_id": selected_project_id},
         },
     )
@@ -133,6 +148,9 @@ async def create_run_route(
     maxfail: str = Form(""),
     workers: str = Form("disabled"),
     env_vars_text: str = Form(""),
+    last_failed: bool = Form(False),
+    failed_first: bool = Form(False),
+    tb: str = Form("auto"),
 ):
     projects = list_projects()
     selected_project_id = project_id or default_project_id()
@@ -145,6 +163,9 @@ async def create_run_route(
         "maxfail": maxfail,
         "workers": workers,
         "env_vars_text": env_vars_text,
+        "last_failed": last_failed,
+        "failed_first": failed_first,
+        "tb": tb,
     }
     try:
         project, display_path, resolved_path, options = _validate_run_form(
@@ -156,6 +177,9 @@ async def create_run_route(
             maxfail,
             workers,
             env_vars_text,
+            last_failed,
+            failed_first,
+            tb,
         )
     except ValueError as exc:
         return templates.TemplateResponse(
@@ -166,6 +190,7 @@ async def create_run_route(
                 "projects": projects,
                 "selected_project_id": selected_project_id,
                 "worker_values": WORKER_VALUES,
+                "tb_values": TB_VALUES,
                 "form": form,
             },
             status_code=http_status.HTTP_400_BAD_REQUEST,
@@ -174,6 +199,11 @@ async def create_run_route(
     run = create_run(project.id, project.name, display_path, resolved_path, options)
     asyncio.create_task(execute_run(run.id))
     return RedirectResponse(url=f"/runs/{run.id}", status_code=http_status.HTTP_303_SEE_OTHER)
+
+
+@app.post("/api/env-vars/validate")
+async def env_vars_validate(env_vars_text: str = Form("")):
+    return asdict(validate_env_vars_detailed(env_vars_text))
 
 
 @app.get("/api/projects/{project_id}/test-targets")
@@ -197,6 +227,9 @@ async def command_preview(
     maxfail: str = Form(""),
     workers: str = Form("disabled"),
     env_vars_text: str = Form(""),
+    last_failed: bool = Form(False),
+    failed_first: bool = Form(False),
+    tb: str = Form("auto"),
 ):
     try:
         project, display_path, resolved_path, options = _validate_run_form(
@@ -208,6 +241,9 @@ async def command_preview(
             maxfail,
             workers,
             env_vars_text,
+            last_failed,
+            failed_first,
+            tb,
         )
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
@@ -232,6 +268,9 @@ async def collect_route(
     maxfail: str = Form(""),
     workers: str = Form("disabled"),
     env_vars_text: str = Form(""),
+    last_failed: bool = Form(False),
+    failed_first: bool = Form(False),
+    tb: str = Form("auto"),
 ):
     try:
         project, _display_path, resolved_path, options = _validate_run_form(
@@ -243,6 +282,9 @@ async def collect_route(
             maxfail,
             workers,
             env_vars_text,
+            last_failed,
+            failed_first,
+            tb,
         )
     except ValueError as exc:
         return {
@@ -257,6 +299,66 @@ async def collect_route(
             "timed_out": False,
         }
     return await collect_tests(project, resolved_path, options)
+
+
+@app.get("/api/run-templates")
+async def run_templates(project_id: str | None = None):
+    return {"templates": [_template_payload(template) for template in list_run_templates(project_id)]}
+
+
+@app.post("/api/run-templates")
+async def save_run_template_route(
+    template_name: str = Form(""),
+    project_id: str = Form(""),
+    test_path: str = Form("."),
+    keyword: str = Form(""),
+    marker: str = Form(""),
+    verbosity: str = Form("normal"),
+    maxfail: str = Form(""),
+    workers: str = Form("disabled"),
+    env_vars_text: str = Form(""),
+    last_failed: bool = Form(False),
+    failed_first: bool = Form(False),
+    tb: str = Form("auto"),
+):
+    try:
+        project, display_path, _resolved_path, options = _validate_run_form(
+            project_id,
+            test_path,
+            keyword,
+            marker,
+            verbosity,
+            maxfail,
+            workers,
+            env_vars_text,
+            last_failed,
+            failed_first,
+            tb,
+        )
+        options.env_vars = {}
+        options.env_var_keys = env_var_keys_from_text(env_vars_text)
+        now = utc_now()
+        template = save_run_template(
+            RunTemplate(
+                id=uuid4().hex[:12],
+                project_id=project.id,
+                name=template_name,
+                test_path=display_path,
+                options=options,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "template": _template_payload(template)}
+
+
+@app.delete("/api/run-templates/{template_id}")
+async def delete_run_template_route(template_id: str):
+    if not delete_run_template(template_id):
+        raise HTTPException(status_code=404, detail="Template not found")
+    return {"ok": True}
 
 
 @app.get("/projects")
@@ -380,7 +482,21 @@ async def delete_project_route(request: Request, project_id: str):
 
 @app.get("/runs")
 async def runs(request: Request):
-    return templates.TemplateResponse(request, "runs.html", {"runs": list_runs()})
+    all_runs = list_runs()
+    return templates.TemplateResponse(
+        request,
+        "runs.html",
+        {"runs": all_runs, "history": build_history_summary(all_runs)},
+    )
+
+
+@app.get("/api/runs")
+async def runs_api():
+    all_runs = list_runs()
+    return {
+        "runs": [run.to_dict() for run in all_runs],
+        "history": asdict(build_history_summary(all_runs)),
+    }
 
 
 @app.get("/runs/{run_id}")
@@ -397,10 +513,19 @@ async def run_detail(request: Request, run_id: str):
             "project": project,
             "has_allure_results": _directory_has_files(run.allure_results_path),
             "has_allure_report": (Path(run.allure_report_path) / "index.html").exists(),
+            "report": report_for_run(run),
             "stdout_preview": read_log_preview(run.stdout_path),
             "stderr_preview": read_log_preview(run.stderr_path),
         },
     )
+
+
+@app.get("/api/runs/{run_id}/report")
+async def run_report(run_id: str):
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return asdict(report_for_run(run))
 
 
 @app.get("/runs/{run_id}/reports/pytest.html")
