@@ -80,7 +80,7 @@ def build_pytest_args(
     command.extend([test_path, *project.default_args])
 
     if collect_only:
-        command.append("--collect-only")
+        command.extend(["--collect-only", "-o", "addopts="])
     elif project.report_mode == "platform" and report_paths:
         plugins = report_plugins or {"html": True, "allure": True}
         if plugins.get("html", True):

@@ -151,10 +151,12 @@
   const saveTemplateButton = document.getElementById("save_template_button");
   const deleteTemplateButton = document.getElementById("delete_template_button");
   const projectDefaultTargets = {{ project_default_targets | tojson }};
+  const collectTimeoutSeconds = {{ collect_timeout_seconds | tojson }};
   const templateById = new Map();
   let suggestionTimer;
   let previewTimer;
   let envValidationTimer;
+  let collectTimer;
 
   function debounce(callback, delay, currentTimerSetter) {
     currentTimerSetter(window.setTimeout(callback, delay));
@@ -183,6 +185,13 @@
     if (result?.error) return result.error;
     if (result?.detail) return typeof result.detail === "string" ? result.detail : JSON.stringify(result.detail);
     return fallback;
+  }
+
+  function formatDuration(seconds) {
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    const rest = seconds % 60;
+    return `${minutes}m ${rest}s`;
   }
 
   function setChecked(id, value) {
@@ -391,8 +400,21 @@
 
   async function collectTests() {
     collectButton.disabled = true;
-    collectOutput.hidden = true;
-    setStatus(collectStatus, "正在收集测试...", true);
+    collectOutput.hidden = false;
+    const startedAt = Date.now();
+    const updateCollectProgress = () => {
+      const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+      const timeoutText = collectTimeoutSeconds ? ` / ${formatDuration(collectTimeoutSeconds)}` : "";
+      setStatus(collectStatus, `正在收集测试... ${formatDuration(elapsed)}${timeoutText}`, true);
+      collectOutput.textContent = [
+        "正在执行 pytest --collect-only，完整命令会在收集结束后显示。",
+        "平台会临时忽略项目 pytest.ini 里的 addopts，避免 xdist/报告参数拖慢收集。",
+        collectTimeoutSeconds ? `超过 ${formatDuration(collectTimeoutSeconds)} 会自动停止。` : "",
+      ].filter(Boolean).join("\n");
+    };
+
+    updateCollectProgress();
+    collectTimer = window.setInterval(updateCollectProgress, 1000);
     try {
       const response = await fetch("/api/collect", {
         method: "POST",
@@ -400,18 +422,21 @@
         headers: {"Accept": "application/json"},
       });
       const data = await response.json();
+      const elapsed = Math.floor((Date.now() - startedAt) / 1000);
       const countText = data.collected_count === null || data.collected_count === undefined ? "未知" : data.collected_count;
-      setStatus(collectStatus, data.ok ? `收集完成：${countText} 个测试` : `收集失败：${data.error || data.return_code}`, data.ok);
+      setStatus(collectStatus, data.ok ? `收集完成：${countText} 个测试，用时 ${formatDuration(elapsed)}` : `收集失败：${data.error || data.return_code}，用时 ${formatDuration(elapsed)}`, data.ok);
       collectOutput.textContent = [
         `$ ${data.display_command || ""}`,
         "",
         data.stdout || "",
         data.stderr ? `\n[stderr]\n${data.stderr}` : "",
       ].join("\n").trim();
-      collectOutput.hidden = false;
     } catch (error) {
-      setStatus(collectStatus, `收集失败：${error}`, false);
+      const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+      setStatus(collectStatus, `收集失败：${error}，用时 ${formatDuration(elapsed)}`, false);
     } finally {
+      window.clearInterval(collectTimer);
+      collectTimer = null;
       collectButton.disabled = false;
     }
   }

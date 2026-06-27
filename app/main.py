@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .config import ALLOWED_TB_VALUES, BASE_DIR
+from .config import ALLOWED_TB_VALUES, BASE_DIR, COLLECT_TIMEOUT_SECONDS
 from .discovery import list_test_target_suggestions
 from .history import build_history_summary
 from .models import RunTemplate, utc_now
@@ -158,6 +158,7 @@ async def index(request: Request, project_id: str | None = None):
             "project_default_targets": _project_default_targets(projects),
             "worker_values": WORKER_VALUES,
             "tb_values": TB_VALUES,
+            "collect_timeout_seconds": COLLECT_TIMEOUT_SECONDS,
             "form": {
                 "project_id": selected_project_id,
                 "test_path": _project_default_test_target(selected_project),
@@ -221,6 +222,7 @@ async def create_run_route(
                 "project_default_targets": _project_default_targets(projects),
                 "worker_values": WORKER_VALUES,
                 "tb_values": TB_VALUES,
+                "collect_timeout_seconds": COLLECT_TIMEOUT_SECONDS,
                 "form": form,
             },
             status_code=http_status.HTTP_400_BAD_REQUEST,

@@ -206,6 +206,7 @@ def test_collect_command_excludes_progress_plugin_and_report_args(tmp_path, monk
     asyncio.run(runner.collect_tests(make_project(tmp_path), tmp_path, RunOptions()))
 
     assert "--collect-only" in captured_command
+    assert captured_command[captured_command.index("-o") + 1] == "addopts="
     assert runner.PROGRESS_PLUGIN not in captured_command
     assert not any(item.startswith("--html=") for item in captured_command)
     assert "--self-contained-html" not in captured_command
