@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{% if mode == 'new' %}新增项目{% else %}编辑项目{% endif %} - pytest-runner-platform{% endblock %}
 {% block content %}
-<section class="card">
+<section class="card config-console">
   <div class="section-title">
     <h1>{% if mode == 'new' %}新增项目{% else %}编辑项目{% endif %}</h1>
     <a class="button-secondary" href="/projects">返回项目列表</a>
