@@ -1,11 +1,27 @@
 from __future__ import annotations
 
 import ast
+import os
 from pathlib import Path
 
 from .projects import ProjectConfig
 
-IGNORED_DIRS = {"__pycache__", ".pytest_cache", ".git", ".venv", "venv", "env", "node_modules"}
+IGNORED_DIRS = {
+    "__pycache__",
+    ".pytest_cache",
+    ".git",
+    ".venv",
+    "venv",
+    "env",
+    "node_modules",
+    ".tox",
+    ".nox",
+    ".mypy_cache",
+    ".ruff_cache",
+    "build",
+    "dist",
+    "htmlcov",
+}
 MAX_SCAN_FILES = 1000
 MAX_TEST_FILE_BYTES = 256 * 1024
 
@@ -31,6 +47,20 @@ def _relative_value(project: ProjectConfig, path: Path) -> str | None:
 
 def _is_test_file(path: Path) -> bool:
     return path.is_file() and path.suffix == ".py" and (path.name.startswith("test_") or path.name.endswith("_test.py"))
+
+
+def _is_test_function_node(node: ast.AST) -> bool:
+    return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_")
+
+
+def _iter_discovery_paths(root: Path):
+    for current_root, dirnames, filenames in os.walk(root):
+        dirnames[:] = [dirname for dirname in dirnames if dirname not in IGNORED_DIRS]
+        current_path = Path(current_root)
+        for dirname in dirnames:
+            yield current_path / dirname
+        for filename in filenames:
+            yield current_path / filename
 
 
 def _matches(value: str, label: str, query: str) -> bool:
@@ -65,7 +95,7 @@ def _nodeid_suggestions(path: Path, relative_path: str) -> list[dict]:
 
     suggestions: list[dict] = []
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+        if _is_test_function_node(node):
             suggestions.append({
                 "value": f"{relative_path}::{node.name}",
                 "label": node.name,
@@ -73,7 +103,7 @@ def _nodeid_suggestions(path: Path, relative_path: str) -> list[dict]:
             })
         elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
             for child in node.body:
-                if isinstance(child, ast.FunctionDef) and child.name.startswith("test_"):
+                if _is_test_function_node(child):
                     suggestions.append({
                         "value": f"{relative_path}::{node.name}::{child.name}",
                         "label": f"{node.name}::{child.name}",
@@ -92,11 +122,9 @@ def list_test_target_suggestions(project: ProjectConfig, query: str = "", limit:
     for allowed_root in allowed_roots:
         if not _is_allowed(allowed_root, allowed_roots) or not allowed_root.exists():
             continue
-        for path in allowed_root.rglob("*"):
+        for path in _iter_discovery_paths(allowed_root):
             if len(suggestions) >= limit or scanned_files >= MAX_SCAN_FILES:
                 break
-            if path.name in IGNORED_DIRS:
-                continue
             if path.is_dir():
                 if not _is_allowed(path, allowed_roots):
                     continue

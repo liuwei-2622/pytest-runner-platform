@@ -6,6 +6,8 @@ import os
 import re
 import shlex
 import shutil
+import signal
+import subprocess
 from pathlib import Path
 
 from .config import (
@@ -13,6 +15,7 @@ from .config import (
     COLLECT_TIMEOUT_SECONDS,
     MAX_COLLECT_OUTPUT_BYTES,
     MAX_CONCURRENT_RUNS,
+    REPORT_PLUGIN_MODE,
     RUN_TIMEOUT_SECONDS,
 )
 from .models import RunOptions, RunProgress, TestRun, utc_now
@@ -20,10 +23,45 @@ from .projects import ProjectConfig, get_project
 from .storage import get_run, update_run, update_run_progress
 
 _semaphore = asyncio.Semaphore(MAX_CONCURRENT_RUNS)
+PROGRESS_PLUGIN = "pytest_runner_platform_progress.plugin"
 
 
 def quote_command_for_display(command: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in command)
+
+
+def _process_group_kwargs() -> dict:
+    return {"start_new_session": True} if os.name == "posix" else {}
+
+
+async def _terminate_process_group(process: asyncio.subprocess.Process, grace_seconds: float = 5) -> None:
+    if process.returncode is not None:
+        return
+
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            await asyncio.wait_for(process.wait(), timeout=grace_seconds)
+            return
+        except asyncio.TimeoutError:
+            pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        await process.wait()
+        return
+
+    process.terminate()
+    try:
+        await asyncio.wait_for(process.wait(), timeout=grace_seconds)
+        return
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
 
 
 def build_pytest_args(
@@ -34,23 +72,22 @@ def build_pytest_args(
     report_paths: dict[str, str] | None,
     collect_only: bool = False,
     include_progress_plugin: bool = True,
+    report_plugins: dict[str, bool] | None = None,
 ) -> list[str]:
     command = [project.python_executable, "-m", "pytest"]
     if include_progress_plugin:
-        command.extend(["-p", "app.pytest_progress"])
+        command.extend(["-p", PROGRESS_PLUGIN])
     command.extend([test_path, *project.default_args])
 
     if collect_only:
         command.append("--collect-only")
     elif project.report_mode == "platform" and report_paths:
-        command.extend(
-            [
-                f"--html={report_paths['html']}",
-                "--self-contained-html",
-                f"--junitxml={report_paths['junit']}",
-                f"--alluredir={report_paths['allure']}",
-            ]
-        )
+        plugins = report_plugins or {"html": True, "allure": True}
+        if plugins.get("html", True):
+            command.extend([f"--html={report_paths['html']}", "--self-contained-html"])
+        command.append(f"--junitxml={report_paths['junit']}")
+        if plugins.get("allure", True):
+            command.append(f"--alluredir={report_paths['allure']}")
 
     if options.keyword:
         command.extend(["-k", options.keyword])
@@ -74,6 +111,39 @@ def build_pytest_args(
     return command
 
 
+def _target_module_available(project: ProjectConfig, options: RunOptions, module_name: str) -> bool:
+    command = [
+        project.python_executable,
+        "-c",
+        "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec(sys.argv[1]) else 1)",
+        module_name,
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(project.working_dir),
+            env=_base_pytest_env(project, options),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _report_plugin_flags(project: ProjectConfig, options: RunOptions) -> dict[str, bool]:
+    if REPORT_PLUGIN_MODE == "strict":
+        return {"html": True, "allure": True}
+    if REPORT_PLUGIN_MODE == "builtin":
+        return {"html": False, "allure": False}
+    return {
+        "html": _target_module_available(project, options, "pytest_html"),
+        "allure": _target_module_available(project, options, "allure_pytest"),
+    }
+
+
 def build_pytest_command(run: TestRun, project: ProjectConfig) -> list[str]:
     return build_pytest_args(
         project=project,
@@ -84,6 +154,7 @@ def build_pytest_command(run: TestRun, project: ProjectConfig) -> list[str]:
             "junit": run.junit_report_path,
             "allure": run.allure_results_path,
         },
+        report_plugins=_report_plugin_flags(project, run.options),
     )
 
 
@@ -97,6 +168,7 @@ def build_preview_command(project: ProjectConfig, test_path: str, options: RunOp
             "junit": "<run-report-dir>/junit.xml",
             "allure": "<run-report-dir>/allure-results",
         },
+        report_plugins=_report_plugin_flags(project, options),
     )
 
 
@@ -189,6 +261,18 @@ def _parse_collected_count(output: str) -> int | None:
     return int(matches[-1])
 
 
+def _report_plugin_error_message(stderr_path: str) -> str:
+    try:
+        stderr = Path(stderr_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    if "unrecognized arguments" not in stderr:
+        return ""
+    if "--html" not in stderr and "--alluredir" not in stderr and "--self-contained-html" not in stderr:
+        return ""
+    return "报告插件参数不被目标 pytest 环境识别，请安装 pytest-html/allure-pytest，或设置 PYTEST_PLATFORM_REPORT_PLUGIN_MODE=auto/builtin"
+
+
 async def collect_tests(project: ProjectConfig, resolved_path: Path, options: RunOptions) -> dict:
     command = build_pytest_args(
         project=project,
@@ -198,24 +282,35 @@ async def collect_tests(project: ProjectConfig, resolved_path: Path, options: Ru
         collect_only=True,
         include_progress_plugin=False,
     )
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        cwd=str(project.working_dir),
-        env=_base_pytest_env(project, options),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            cwd=str(project.working_dir),
+            env=_base_pytest_env(project, options),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            **_process_group_kwargs(),
+        )
+    except OSError as exc:
+        error = f"收集测试启动失败: {type(exc).__name__}: {exc}"
+        return {
+            "ok": False,
+            "return_code": None,
+            "command": command,
+            "display_command": quote_command_for_display(command),
+            "collected_count": None,
+            "stdout": "",
+            "stderr": error,
+            "timed_out": False,
+            "error": error,
+        }
     timed_out = False
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=COLLECT_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         timed_out = True
-        process.terminate()
-        try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=5)
-        except asyncio.TimeoutError:
-            process.kill()
-            stdout, stderr = await process.communicate()
+        await _terminate_process_group(process)
+        stdout, stderr = await process.communicate()
         stderr += f"\nCollect timed out after {COLLECT_TIMEOUT_SECONDS} seconds.\n".encode()
 
     stdout_text = _trim_output(stdout)
@@ -264,84 +359,104 @@ async def _generate_allure_report(run: TestRun) -> str:
 
 async def execute_run(run_id: str) -> None:
     async with _semaphore:
-        run = get_run(run_id)
-        if not run:
-            return
-
-        project = get_project(run.project_id)
-        if not project:
-            update_run(
-                run_id,
-                status="error",
-                finished_at=utc_now(),
-                error_message=f"项目配置不存在: {run.project_id}",
-            )
-            return
-
-        command = build_pytest_command(run, project)
-        run = update_run(
-            run_id,
-            status="running",
-            started_at=utc_now(),
-            command=command,
-            progress=RunProgress(updated_at=utc_now()),
-        )
-
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            cwd=str(project.working_dir),
-            env=_pytest_env(project, run),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-
-        stop_progress = asyncio.Event()
-        stdout_task = asyncio.create_task(_pump_stream(process.stdout, run.stdout_path))
-        stderr_task = asyncio.create_task(_pump_stream(process.stderr, run.stderr_path))
-        progress_task = asyncio.create_task(_watch_progress(run_id, _progress_path(run), stop_progress))
-
+        process: asyncio.subprocess.Process | None = None
+        stop_progress: asyncio.Event | None = None
+        stdout_task: asyncio.Task | None = None
+        stderr_task: asyncio.Task | None = None
+        progress_task: asyncio.Task | None = None
         try:
-            await asyncio.wait_for(process.wait(), timeout=RUN_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            process.terminate()
+            run = get_run(run_id)
+            if not run:
+                return
+
+            project = get_project(run.project_id)
+            if not project:
+                update_run(
+                    run_id,
+                    status="error",
+                    finished_at=utc_now(),
+                    error_message=f"项目配置不存在: {run.project_id}",
+                )
+                return
+
+            command = build_pytest_command(run, project)
+            run = update_run(
+                run_id,
+                status="running",
+                started_at=utc_now(),
+                command=command,
+                progress=RunProgress(updated_at=utc_now()),
+            )
+
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                cwd=str(project.working_dir),
+                env=_pytest_env(project, run),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                **_process_group_kwargs(),
+            )
+
+            stop_progress = asyncio.Event()
+            stdout_task = asyncio.create_task(_pump_stream(process.stdout, run.stdout_path))
+            stderr_task = asyncio.create_task(_pump_stream(process.stderr, run.stderr_path))
+            progress_task = asyncio.create_task(_watch_progress(run_id, _progress_path(run), stop_progress))
+
             try:
-                await asyncio.wait_for(process.wait(), timeout=5)
+                await asyncio.wait_for(process.wait(), timeout=RUN_TIMEOUT_SECONDS)
             except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+                await _terminate_process_group(process)
+                await asyncio.gather(stdout_task, stderr_task)
+                stop_progress.set()
+                await progress_task
+                _append_bytes(
+                    run.stderr_path,
+                    f"\nRun timed out after {RUN_TIMEOUT_SECONDS} seconds.\n".encode(),
+                )
+                update_run(
+                    run_id,
+                    status="timeout",
+                    finished_at=utc_now(),
+                    return_code=process.returncode,
+                    error_message=f"运行超过 {RUN_TIMEOUT_SECONDS} 秒后超时",
+                )
+                return
+
             await asyncio.gather(stdout_task, stderr_task)
             stop_progress.set()
             await progress_task
-            _append_bytes(
-                run.stderr_path,
-                f"\nRun timed out after {RUN_TIMEOUT_SECONDS} seconds.\n".encode(),
-            )
+
+            if process.returncode == 0:
+                status = "passed"
+            elif process.returncode == 1:
+                status = "failed"
+            else:
+                status = "error"
+
+            report_plugin_error = _report_plugin_error_message(run.stderr_path) if status == "error" else ""
+            allure_warning = await _generate_allure_report(run)
+
             update_run(
                 run_id,
-                status="timeout",
+                status=status,
                 finished_at=utc_now(),
                 return_code=process.returncode,
-                error_message=f"运行超过 {RUN_TIMEOUT_SECONDS} 秒后超时",
+                error_message=report_plugin_error or allure_warning,
             )
-            return
-
-        await asyncio.gather(stdout_task, stderr_task)
-        stop_progress.set()
-        await progress_task
-
-        if process.returncode == 0:
-            status = "passed"
-        elif process.returncode == 1:
-            status = "failed"
-        else:
-            status = "error"
-
-        allure_warning = await _generate_allure_report(run)
-
-        update_run(
-            run_id,
-            status=status,
-            finished_at=utc_now(),
-            return_code=process.returncode,
-            error_message=allure_warning,
-        )
+        except Exception as exc:
+            if process and process.returncode is None:
+                await _terminate_process_group(process)
+            if stop_progress:
+                stop_progress.set()
+            tasks = [task for task in [stdout_task, stderr_task, progress_task] if task]
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                update_run(
+                    run_id,
+                    status="error",
+                    finished_at=utc_now(),
+                    error_message=f"运行异常: {type(exc).__name__}: {exc}",
+                )
+            except KeyError:
+                return

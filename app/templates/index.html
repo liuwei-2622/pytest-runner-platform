@@ -3,7 +3,7 @@
 {% block content %}
 <section class="card run-console">
   <h1>运行 pytest</h1>
-  <p class="muted">选择一个 pytest 项目后，测试目标会按该项目根目录解析，并限制在项目允许的测试目录内。</p>
+  <p class="muted">选择一个 pytest 项目后，测试路径会按该项目根目录解析，并限制在项目允许的测试目录内。</p>
   {% if error %}
     <div class="alert">{{ error }}</div>
   {% endif %}
@@ -43,8 +43,8 @@
     </section>
 
     <label class="target-field">
-      测试目标
-      <input id="test_path" name="test_path" value="{{ form.get('test_path', '.') }}" placeholder="例如 .、tests、tests/test_api.py::test_login" autocomplete="off" required>
+      测试路径
+      <input id="test_path" name="test_path" value="{{ form.get('test_path', project_default_targets.get(selected_project, '.')) }}" placeholder="例如 tests、tests/test_api.py::test_login" autocomplete="off" required>
       <div id="target_suggestions" class="suggestions" hidden></div>
     </label>
     <label>
@@ -115,7 +115,7 @@
         <h2>命令预览</h2>
         <span id="command_preview_status" class="muted">等待输入...</span>
       </div>
-      <pre id="command_preview" class="code">选择项目和测试目标后显示 pytest 命令。</pre>
+      <pre id="command_preview" class="code">选择项目和测试路径后显示 pytest 命令。</pre>
     </section>
 
     <section class="collect-panel">
@@ -150,6 +150,7 @@
   const applyTemplateButton = document.getElementById("apply_template_button");
   const saveTemplateButton = document.getElementById("save_template_button");
   const deleteTemplateButton = document.getElementById("delete_template_button");
+  const projectDefaultTargets = {{ project_default_targets | tojson }};
   const templateById = new Map();
   let suggestionTimer;
   let previewTimer;
@@ -172,6 +173,10 @@
   function setField(id, value) {
     const element = document.getElementById(id);
     if (element) element.value = value ?? "";
+  }
+
+  function defaultTargetForCurrentProject() {
+    return projectDefaultTargets[project.value] || ".";
   }
 
   function responseError(result, fallback) {
@@ -412,8 +417,10 @@
   }
 
   project.addEventListener("change", () => {
+    testPath.value = defaultTargetForCurrentProject();
     loadTemplates();
     loadSuggestions();
+    refreshPreview();
   });
 
   testPath.addEventListener("input", () => {

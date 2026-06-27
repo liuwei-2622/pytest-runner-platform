@@ -28,9 +28,16 @@ from .reports import report_for_run
 from .run_templates import delete_run_template, list_run_templates, save_run_template
 from .runner import build_preview_command, collect_tests, execute_run, quote_command_for_display
 from .security import env_var_keys_from_text, validate_env_vars, validate_env_vars_detailed, validate_options, validate_test_path
-from .storage import artifact_path, create_run, get_run, list_runs, read_log_preview
+from .storage import artifact_path, create_run, get_run, list_runs, read_log_preview, recover_stale_runs
 
 app = FastAPI(title="pytest-runner-platform")
+
+
+@app.on_event("startup")
+async def recover_stale_runs_on_startup():
+    recover_stale_runs()
+
+
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "app/static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "app/templates"))
 WORKER_VALUES = ["disabled", "auto", "1", "2", "4", "8"]
@@ -120,19 +127,41 @@ def _template_payload(template: RunTemplate) -> dict:
     return data
 
 
+def _project_default_test_target(project: ProjectConfig) -> str:
+    if not project.allowed_test_roots:
+        return "."
+    root = Path(project.root_path).expanduser().resolve()
+    allowed_root = Path(project.allowed_test_roots[0]).expanduser().resolve()
+    try:
+        relative_path = allowed_root.relative_to(root)
+    except ValueError:
+        return "."
+    return relative_path.as_posix()
+
+
+def _project_default_targets(projects: list[ProjectConfig]) -> dict[str, str]:
+    return {project.id: _project_default_test_target(project) for project in projects}
+
+
 @app.get("/")
 async def index(request: Request, project_id: str | None = None):
     projects = list_projects()
     selected_project_id = project_id or default_project_id()
+    selected_project = get_project(selected_project_id) or projects[0]
+    selected_project_id = selected_project.id
     return templates.TemplateResponse(
         request,
         "index.html",
         {
             "projects": projects,
             "selected_project_id": selected_project_id,
+            "project_default_targets": _project_default_targets(projects),
             "worker_values": WORKER_VALUES,
             "tb_values": TB_VALUES,
-            "form": {"project_id": selected_project_id},
+            "form": {
+                "project_id": selected_project_id,
+                "test_path": _project_default_test_target(selected_project),
+            },
         },
     )
 
@@ -189,6 +218,7 @@ async def create_run_route(
                 "error": str(exc),
                 "projects": projects,
                 "selected_project_id": selected_project_id,
+                "project_default_targets": _project_default_targets(projects),
                 "worker_values": WORKER_VALUES,
                 "tb_values": TB_VALUES,
                 "form": form,
@@ -516,6 +546,7 @@ async def run_detail(request: Request, run_id: str):
             "report": report_for_run(run),
             "stdout_preview": read_log_preview(run.stdout_path),
             "stderr_preview": read_log_preview(run.stderr_path),
+            "display_command": quote_command_for_display(run.command) if run.command else "",
         },
     )
 

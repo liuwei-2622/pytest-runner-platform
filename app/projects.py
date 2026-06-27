@@ -61,16 +61,16 @@ class ProjectConfig:
 
 
 def default_project() -> ProjectConfig:
-    workspace = BASE_DIR / "tests_workspace"
+    demo_project = BASE_DIR / "demo_project"
     return ProjectConfig(
-        id="sample",
-        name="Sample Workspace",
-        root_path=str(workspace),
+        id="demo",
+        name="Demo Project",
+        root_path=str(demo_project),
         python_executable=sys.executable,
-        working_directory=str(BASE_DIR),
-        allowed_test_roots=[str(workspace)],
+        working_directory=str(demo_project),
+        allowed_test_roots=[str(demo_project / "tests")],
         default_args=[],
-        default_env={},
+        default_env={"DEMO_PROJECT_ENV": "ok"},
         report_mode="platform",
     )
 

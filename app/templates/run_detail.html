@@ -65,7 +65,7 @@
 
   <h2>命令</h2>
   {% if run.command %}
-    <pre class="code">{{ run.command | join(' ') }}</pre>
+    <pre class="code">{{ display_command }}</pre>
   {% else %}
     <p class="muted">任务仍在队列中。</p>
   {% endif %}

@@ -9,6 +9,7 @@ from .config import MAX_LOG_PREVIEW_BYTES, REPORTS_DIR
 from .models import RunOptions, RunProgress, TestRun, utc_now
 
 _lock = Lock()
+ACTIVE_STATUSES = {"queued", "running"}
 
 
 def ensure_storage() -> None:
@@ -96,6 +97,19 @@ def list_runs() -> list[TestRun]:
         except (OSError, json.JSONDecodeError, TypeError):
             continue
     return sorted(runs, key=lambda item: item.created_at, reverse=True)
+
+
+def recover_stale_runs(reason: str = "应用重启后恢复中断的运行") -> int:
+    recovered = 0
+    for run in list_runs():
+        if run.status not in ACTIVE_STATUSES:
+            continue
+        try:
+            update_run(run.id, status="error", finished_at=utc_now(), error_message=reason)
+        except KeyError:
+            continue
+        recovered += 1
+    return recovered
 
 
 def artifact_path(run_id: str, artifact: str) -> Path | None:
