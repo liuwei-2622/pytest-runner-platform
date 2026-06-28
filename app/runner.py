@@ -280,6 +280,28 @@ async def _read_collect_output(kind: str, stream: asyncio.StreamReader | None, q
         await queue.put({"event": kind, "text": chunk.decode("utf-8", errors="replace")})
 
 
+async def _cancel_unfinished_tasks(*tasks: asyncio.Task | None) -> None:
+    pending = [task for task in tasks if task and not task.done()]
+    for task in pending:
+        task.cancel()
+    active = [task for task in tasks if task]
+    if active:
+        await asyncio.gather(*active, return_exceptions=True)
+
+
+async def _finish_run_tasks(
+    stop_progress: asyncio.Event | None,
+    stdout_task: asyncio.Task | None,
+    stderr_task: asyncio.Task | None,
+    progress_task: asyncio.Task | None,
+) -> None:
+    if stop_progress:
+        stop_progress.set()
+    tasks = [task for task in [stdout_task, stderr_task, progress_task] if task]
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def collect_tests(project: ProjectConfig, resolved_path: Path, options: RunOptions) -> dict:
     command = build_pytest_args(
         project=project,
@@ -407,8 +429,16 @@ async def stream_collect_tests(project: ProjectConfig, resolved_path: Path, opti
                 timed_out = True
                 await _terminate_process_group(process)
                 break
+    except asyncio.CancelledError:
+        if process.returncode is None:
+            await _terminate_process_group(process)
+        await _cancel_unfinished_tasks(stdout_task, stderr_task, wait_task)
+        raise
     finally:
-        await asyncio.gather(stdout_task, stderr_task, wait_task, return_exceptions=True)
+        if process.returncode is None:
+            await _cancel_unfinished_tasks(stdout_task, stderr_task, wait_task)
+        else:
+            await asyncio.gather(stdout_task, stderr_task, wait_task, return_exceptions=True)
 
     while not queue.empty():
         yield await queue.get()
@@ -460,13 +490,13 @@ async def _generate_allure_report(run: TestRun) -> str:
 
 
 async def execute_run(run_id: str) -> None:
-    async with _semaphore:
-        process: asyncio.subprocess.Process | None = None
-        stop_progress: asyncio.Event | None = None
-        stdout_task: asyncio.Task | None = None
-        stderr_task: asyncio.Task | None = None
-        progress_task: asyncio.Task | None = None
-        try:
+    process: asyncio.subprocess.Process | None = None
+    stop_progress: asyncio.Event | None = None
+    stdout_task: asyncio.Task | None = None
+    stderr_task: asyncio.Task | None = None
+    progress_task: asyncio.Task | None = None
+    try:
+        async with _semaphore:
             run = get_run(run_id)
             if not run:
                 return
@@ -508,9 +538,7 @@ async def execute_run(run_id: str) -> None:
                 await asyncio.wait_for(process.wait(), timeout=RUN_TIMEOUT_SECONDS)
             except asyncio.TimeoutError:
                 await _terminate_process_group(process)
-                await asyncio.gather(stdout_task, stderr_task)
-                stop_progress.set()
-                await progress_task
+                await _finish_run_tasks(stop_progress, stdout_task, stderr_task, progress_task)
                 _append_bytes(
                     run.stderr_path,
                     f"\nRun timed out after {RUN_TIMEOUT_SECONDS} seconds.\n".encode(),
@@ -545,20 +573,32 @@ async def execute_run(run_id: str) -> None:
                 return_code=process.returncode,
                 error_message=report_plugin_error or allure_warning,
             )
-        except Exception as exc:
-            if process and process.returncode is None:
-                await _terminate_process_group(process)
-            if stop_progress:
-                stop_progress.set()
-            tasks = [task for task in [stdout_task, stderr_task, progress_task] if task]
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            try:
-                update_run(
-                    run_id,
-                    status="error",
-                    finished_at=utc_now(),
-                    error_message=f"运行异常: {type(exc).__name__}: {exc}",
-                )
-            except KeyError:
-                return
+    except asyncio.CancelledError:
+        if process and process.returncode is None:
+            await _terminate_process_group(process)
+        await _finish_run_tasks(stop_progress, stdout_task, stderr_task, progress_task)
+        try:
+            update_run(
+                run_id,
+                status="error",
+                finished_at=utc_now(),
+                return_code=process.returncode if process else None,
+                error_message="运行被取消或服务关闭",
+            )
+        except KeyError:
+            pass
+        raise
+    except Exception as exc:
+        if process and process.returncode is None:
+            await _terminate_process_group(process)
+        await _finish_run_tasks(stop_progress, stdout_task, stderr_task, progress_task)
+        try:
+            update_run(
+                run_id,
+                status="error",
+                finished_at=utc_now(),
+                return_code=process.returncode if process else None,
+                error_message=f"运行异常: {type(exc).__name__}: {exc}",
+            )
+        except KeyError:
+            return

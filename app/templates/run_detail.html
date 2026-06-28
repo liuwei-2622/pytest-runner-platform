@@ -5,7 +5,12 @@
 <section class="card run-detail-console">
   <div class="section-title">
     <h1>运行 <code>{{ run.id }}</code></h1>
-    <span id="run-status" class="badge badge-{{ run.status }}">{{ run.status }}</span>
+    <div class="actions">
+      {% if run.status in ['queued', 'running'] %}
+        <button type="button" id="cancel-run-button" class="button-secondary">取消运行</button>
+      {% endif %}
+      <span id="run-status" class="badge badge-{{ run.status }}">{{ run.status }}</span>
+    </div>
   </div>
 
   {% if run.error_message %}
@@ -16,13 +21,7 @@
     <div class="progress-header">
       <h2>运行进度</h2>
       <span id="progress-label">
-        {% if run.progress.percent is not none %}
-          {{ run.progress.percent }}%
-        {% elif run.status == 'queued' %}
-          等待开始...
-        {% else %}
-          正在收集测试...
-        {% endif %}
+        {{ phase_text }}
       </span>
     </div>
     <div class="progress-bar" aria-hidden="true">
@@ -178,10 +177,10 @@
   </div>
 
   <h2>stdout 预览</h2>
-  <pre class="log">{{ stdout_preview or '暂无 stdout。' }}</pre>
+  <pre id="stdout-preview" class="log">{{ stdout_preview or '暂无 stdout。' }}</pre>
 
   <h2>stderr 预览</h2>
-  <pre class="log">{{ stderr_preview or '暂无 stderr。' }}</pre>
+  <pre id="stderr-preview" class="log">{{ stderr_preview or '暂无 stderr。' }}</pre>
 </section>
 
 <script>
@@ -199,17 +198,20 @@
   const finishedAt = document.getElementById("run-finished-at");
   const duration = document.getElementById("run-duration");
   const returnCode = document.getElementById("run-return-code");
+  const stdoutPreview = document.getElementById("stdout-preview");
+  const stderrPreview = document.getElementById("stderr-preview");
+  const cancelRunButton = document.getElementById("cancel-run-button");
   let reloaded = false;
 
   function setText(element, value) {
     if (element) element.textContent = value;
   }
 
-  function updateProgress(progress) {
+  function updateProgress(progress, phaseText) {
     const percent = progress.percent ?? 0;
     progressFill.style.width = `${percent}%`;
     if (progress.percent === null || progress.percent === undefined) {
-      progressLabel.textContent = progress.collected === null || progress.collected === undefined ? "正在收集测试..." : "0%";
+      progressLabel.textContent = phaseText || (progress.collected === null || progress.collected === undefined ? "pytest 启动/收集中..." : "执行测试中...");
     } else {
       progressLabel.textContent = `${progress.percent}%`;
     }
@@ -218,6 +220,22 @@
     setText(passed, progress.passed ?? 0);
     setText(failed, (progress.failed ?? 0) + (progress.errors ?? 0));
     setText(skipped, progress.skipped ?? 0);
+  }
+
+  async function cancelRun() {
+    if (!cancelRunButton) return;
+    cancelRunButton.disabled = true;
+    cancelRunButton.textContent = "正在取消...";
+    const response = await fetch(`/api/runs/${runId}/cancel`, {
+      method: "POST",
+      headers: {"Accept": "application/json"},
+    });
+    if (!response.ok) {
+      cancelRunButton.disabled = false;
+      cancelRunButton.textContent = "取消运行";
+      return;
+    }
+    await poll();
   }
 
   async function poll() {
@@ -230,12 +248,21 @@
     setText(finishedAt, data.finished_at || "-");
     setText(duration, data.duration_seconds === null || data.duration_seconds === undefined ? "-" : `${data.duration_seconds}s`);
     setText(returnCode, data.return_code === null || data.return_code === undefined ? "-" : data.return_code);
-    updateProgress(data.progress || {});
+    setText(stdoutPreview, data.stdout_preview || "暂无 stdout。");
+    setText(stderrPreview, data.stderr_preview || "暂无 stderr。");
+    updateProgress(data.progress || {}, data.phase_text);
 
+    if (!data.is_active && cancelRunButton) {
+      cancelRunButton.remove();
+    }
     if (!data.is_active && !reloaded) {
       reloaded = true;
       window.setTimeout(() => window.location.reload(), 800);
     }
+  }
+
+  if (cancelRunButton) {
+    cancelRunButton.addEventListener("click", cancelRun);
   }
 
   if (["queued", "running"].includes(statusBadge.textContent.trim())) {

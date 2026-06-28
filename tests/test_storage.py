@@ -123,6 +123,10 @@ def test_count_runs_and_paginated_list_runs_use_sqlite_order(tmp_path, monkeypat
     assert [run.id for run in storage.list_runs(limit=2, offset=1)] == [second.id, first.id]
     assert [run.id for run in storage.list_runs()] == [third.id, second.id, first.id]
 
+    storage.update_run(first.id, created_at="2026-01-04T00:00:00+00:00")
+    storage.update_run(second.id, created_at="2026-01-04T00:00:00+00:00")
+    assert [run.id for run in storage.list_runs(limit=2)] == sorted([first.id, second.id], reverse=True)
+
 
 def test_legacy_metadata_is_backfilled_idempotently_and_corrupt_json_is_skipped(tmp_path, monkeypatch):
     isolate_storage(tmp_path, monkeypatch)
@@ -143,6 +147,112 @@ def test_legacy_metadata_is_backfilled_idempotently_and_corrupt_json_is_skipped(
     with sqlite3.connect(storage.RUN_METADATA_DB) as conn:
         count = conn.execute("SELECT count(*) FROM runs").fetchone()[0]
     assert count == 1
+
+
+def test_existing_sqlite_schema_is_migrated_and_metadata_is_backfilled(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    report_dir = tmp_path / "reports" / "old001"
+    report_dir.mkdir(parents=True)
+    storage.RUN_METADATA_DB.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(storage.RUN_METADATA_DB) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE runs (
+              id TEXT PRIMARY KEY,
+              status TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              started_at TEXT,
+              finished_at TEXT,
+              project_id TEXT NOT NULL,
+              project_name TEXT NOT NULL,
+              test_path TEXT NOT NULL,
+              resolved_test_path TEXT NOT NULL,
+              return_code INTEGER,
+              report_dir TEXT NOT NULL,
+              html_report_path TEXT NOT NULL,
+              junit_report_path TEXT NOT NULL,
+              stdout_path TEXT NOT NULL,
+              stderr_path TEXT NOT NULL,
+              command_json TEXT NOT NULL DEFAULT '[]',
+              options_json TEXT NOT NULL DEFAULT '{}',
+              progress_json TEXT NOT NULL DEFAULT '{}',
+              updated_at TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO runs (
+              id, status, created_at, started_at, finished_at, project_id, project_name,
+              test_path, resolved_test_path, return_code, report_dir, html_report_path,
+              junit_report_path, stdout_path, stderr_path, command_json, options_json,
+              progress_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "old001",
+                "failed",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:01+00:00",
+                "2026-01-01T00:00:02+00:00",
+                "demo",
+                "Demo",
+                "tests/test_old.py",
+                str(tmp_path / "tests" / "test_old.py"),
+                1,
+                str(report_dir),
+                str(report_dir / "pytest.html"),
+                str(report_dir / "junit.xml"),
+                str(report_dir / "stdout.log"),
+                str(report_dir / "stderr.log"),
+                json.dumps(["python", "-m", "pytest", "tests/test_old.py"]),
+                json.dumps({"keyword": "old", "workers": "auto"}),
+                json.dumps({"collected": 2, "completed": 2, "failed": 1, "percent": 100.0}),
+                "2026-01-01T00:00:02+00:00",
+            ),
+        )
+
+    storage.ensure_storage()
+    loaded = storage.get_run("old001")
+
+    with sqlite3.connect(storage.RUN_METADATA_DB) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(runs)")}
+        row = conn.execute("SELECT metadata_json FROM runs WHERE id = 'old001'").fetchone()
+
+    assert {"allure_results_path", "allure_report_path", "error_message", "metadata_json"} <= columns
+    assert row[0] != "{}"
+    assert loaded.status == "failed"
+    assert loaded.command == ["python", "-m", "pytest", "tests/test_old.py"]
+    assert loaded.options.keyword == "old"
+    assert loaded.options.workers == "auto"
+    assert loaded.progress.failed == 1
+    assert loaded.allure_results_path.endswith("allure-results")
+    assert loaded.allure_report_path.endswith("allure-report")
+    assert loaded.error_message == ""
+
+
+def test_minimal_existing_sqlite_schema_migrates_before_creating_indexes(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    storage.RUN_METADATA_DB.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(storage.RUN_METADATA_DB) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE runs (id TEXT PRIMARY KEY);
+            INSERT INTO runs (id) VALUES ('minimal001');
+            """
+        )
+
+    storage.ensure_storage()
+    loaded = storage.get_run("minimal001")
+
+    with sqlite3.connect(storage.RUN_METADATA_DB) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(runs)")}
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(runs)")}
+
+    assert {"status", "created_at", "metadata_json"} <= columns
+    assert {"idx_runs_created_at", "idx_runs_status"} <= indexes
+    assert loaded.id == "minimal001"
+    assert loaded.status == "queued"
 
 
 def test_artifact_path_and_log_preview_remain_disk_backed(tmp_path, monkeypatch):

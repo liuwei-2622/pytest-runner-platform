@@ -40,6 +40,9 @@ CREATE TABLE IF NOT EXISTS runs (
   metadata_json TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+"""
+
+INDEX_SCHEMA = """
 CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
 """
@@ -63,12 +66,108 @@ def _connect() -> sqlite3.Connection:
     return connection
 
 
+RUN_COLUMN_MIGRATIONS = {
+    "status": "TEXT NOT NULL DEFAULT 'queued'",
+    "created_at": "TEXT NOT NULL DEFAULT ''",
+    "started_at": "TEXT",
+    "finished_at": "TEXT",
+    "project_id": "TEXT NOT NULL DEFAULT 'sample'",
+    "project_name": "TEXT NOT NULL DEFAULT 'Sample Workspace'",
+    "test_path": "TEXT NOT NULL DEFAULT ''",
+    "resolved_test_path": "TEXT NOT NULL DEFAULT ''",
+    "return_code": "INTEGER",
+    "report_dir": "TEXT NOT NULL DEFAULT ''",
+    "html_report_path": "TEXT NOT NULL DEFAULT ''",
+    "junit_report_path": "TEXT NOT NULL DEFAULT ''",
+    "stdout_path": "TEXT NOT NULL DEFAULT ''",
+    "stderr_path": "TEXT NOT NULL DEFAULT ''",
+    "allure_results_path": "TEXT NOT NULL DEFAULT ''",
+    "allure_report_path": "TEXT NOT NULL DEFAULT ''",
+    "error_message": "TEXT NOT NULL DEFAULT ''",
+    "command_json": "TEXT NOT NULL DEFAULT '[]'",
+    "options_json": "TEXT NOT NULL DEFAULT '{}'",
+    "progress_json": "TEXT NOT NULL DEFAULT '{}'",
+    "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+    "updated_at": "TEXT NOT NULL DEFAULT ''",
+}
+
+
 def _init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    _migrate_run_columns(conn)
+    _backfill_row_metadata(conn)
+    conn.executescript(INDEX_SCHEMA)
+
+
+def _migrate_run_columns(conn: sqlite3.Connection) -> None:
+    existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(runs)")}
+    for column, definition in RUN_COLUMN_MIGRATIONS.items():
+        if column not in existing_columns:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {column} {definition}")
 
 
 def _json_dumps(data) -> str:
     return json.dumps(data, ensure_ascii=False)
+
+
+def _json_loads(raw: str | None, default):
+    if not raw:
+        return default
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return default
+    return value if isinstance(value, type(default)) else default
+
+
+def _row_value(row: sqlite3.Row, key: str, default=""):
+    value = row[key]
+    return default if value is None else value
+
+
+def _row_metadata(row: sqlite3.Row) -> dict:
+    run_id = _row_value(row, "id")
+    report_dir = _row_value(row, "report_dir") or str(REPORTS_DIR / run_id)
+    return TestRun.from_dict(
+        {
+            "id": run_id,
+            "status": _row_value(row, "status", "queued"),
+            "created_at": _row_value(row, "created_at", utc_now()),
+            "started_at": row["started_at"],
+            "finished_at": row["finished_at"],
+            "test_path": _row_value(row, "test_path"),
+            "resolved_test_path": _row_value(row, "resolved_test_path"),
+            "options": _json_loads(row["options_json"], {}),
+            "return_code": row["return_code"],
+            "command": _json_loads(row["command_json"], []),
+            "report_dir": report_dir,
+            "html_report_path": _row_value(row, "html_report_path") or str(Path(report_dir) / "pytest.html"),
+            "junit_report_path": _row_value(row, "junit_report_path") or str(Path(report_dir) / "junit.xml"),
+            "stdout_path": _row_value(row, "stdout_path") or str(Path(report_dir) / "stdout.log"),
+            "stderr_path": _row_value(row, "stderr_path") or str(Path(report_dir) / "stderr.log"),
+            "allure_results_path": _row_value(row, "allure_results_path") or str(Path(report_dir) / "allure-results"),
+            "allure_report_path": _row_value(row, "allure_report_path") or str(Path(report_dir) / "allure-report"),
+            "project_id": _row_value(row, "project_id", "sample"),
+            "project_name": _row_value(row, "project_name", "Sample Workspace"),
+            "error_message": _row_value(row, "error_message"),
+            "progress": _json_loads(row["progress_json"], {}),
+        }
+    ).to_dict()
+
+
+def _backfill_row_metadata(conn: sqlite3.Connection) -> None:
+    rows = conn.execute("SELECT * FROM runs WHERE metadata_json IS NULL OR metadata_json IN ('', '{}')").fetchall()
+    for row in rows:
+        conn.execute(
+            "UPDATE runs SET metadata_json = ?, command_json = ?, options_json = ?, progress_json = ? WHERE id = ?",
+            (
+                _json_dumps(_row_metadata(row)),
+                _json_dumps(_json_loads(row["command_json"], [])),
+                _json_dumps(_json_loads(row["options_json"], {})),
+                _json_dumps(_json_loads(row["progress_json"], {})),
+                row["id"],
+            ),
+        )
 
 
 def _run_to_row(run: TestRun) -> dict:
@@ -205,7 +304,7 @@ def update_run_progress(run_id: str, progress: RunProgress) -> TestRun:
 def list_runs(limit: int | None = None, offset: int = 0) -> list[TestRun]:
     ensure_storage()
     runs: list[TestRun] = []
-    query = "SELECT metadata_json FROM runs ORDER BY created_at DESC"
+    query = "SELECT metadata_json FROM runs ORDER BY created_at DESC, id DESC"
     parameters: tuple[int, ...] = ()
     if limit is not None:
         query += " LIMIT ? OFFSET ?"

@@ -29,14 +29,38 @@ from .reports import report_for_run
 from .run_templates import delete_run_template, list_run_templates, save_run_template
 from .runner import build_preview_command, collect_tests, execute_run, quote_command_for_display, stream_collect_tests
 from .security import env_var_keys_from_text, validate_env_vars, validate_env_vars_detailed, validate_options, validate_test_path
-from .storage import artifact_path, count_runs, create_run, get_run, list_runs, read_log_preview, recover_stale_runs
+from .storage import artifact_path, count_runs, create_run, get_run, list_runs, read_log_preview, recover_stale_runs, update_run
 
 app = FastAPI(title="pytest-runner-platform")
+_RUN_TASKS: dict[str, asyncio.Task] = {}
 
 
 @app.on_event("startup")
 async def recover_stale_runs_on_startup():
     recover_stale_runs()
+
+
+@app.on_event("shutdown")
+async def cancel_active_run_tasks_on_shutdown():
+    tasks = [task for task in _RUN_TASKS.values() if not task.done()]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _RUN_TASKS.clear()
+
+
+def _schedule_run_task(run_id: str) -> asyncio.Task:
+    task = asyncio.create_task(execute_run(run_id))
+    _RUN_TASKS[run_id] = task
+
+    def remove_task(done_task: asyncio.Task) -> None:
+        _RUN_TASKS.pop(run_id, None)
+        if not done_task.cancelled():
+            done_task.exception()
+
+    task.add_done_callback(remove_task)
+    return task
 
 
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "app/static")), name="static")
@@ -172,8 +196,37 @@ def _project_collect_timeouts(projects: list[ProjectConfig]) -> dict[str, int]:
     return {project.id: project.collect_timeout_seconds for project in projects}
 
 
+def _project_default_env_text(project: ProjectConfig) -> str:
+    return "\n".join(f"{key}={value}" for key, value in project.default_env.items())
+
+
+def _project_default_envs(projects: list[ProjectConfig]) -> dict[str, str]:
+    return {project.id: _project_default_env_text(project) for project in projects}
+
+
 def _ndjson_event(data: dict) -> str:
     return json.dumps(data, ensure_ascii=False) + "\n"
+
+
+def _path_size(path: str) -> int:
+    try:
+        return Path(path).stat().st_size
+    except OSError:
+        return 0
+
+
+def _run_phase_text(run) -> str:
+    if run.status == "queued":
+        return "等待开始..."
+    if run.status != "running":
+        return "已结束"
+    if run.progress.collected is None:
+        if _path_size(run.stdout_path) or _path_size(run.stderr_path):
+            return "pytest 启动/环境准备中（已有日志输出）"
+        return "pytest 启动/收集中..."
+    if run.progress.percent is None:
+        return "执行测试中..."
+    return f"{run.progress.percent}%"
 
 
 @app.get("/")
@@ -189,6 +242,7 @@ async def index(request: Request, project_id: str | None = None):
             "projects": projects,
             "selected_project_id": selected_project_id,
             "project_default_targets": _project_default_targets(projects),
+            "project_default_envs": _project_default_envs(projects),
             "project_collect_timeouts": _project_collect_timeouts(projects),
             "worker_values": WORKER_VALUES,
             "tb_values": TB_VALUES,
@@ -196,6 +250,7 @@ async def index(request: Request, project_id: str | None = None):
             "form": {
                 "project_id": selected_project_id,
                 "test_path": _project_default_test_target(selected_project),
+                "env_vars_text": _project_default_env_text(selected_project),
             },
         },
     )
@@ -254,6 +309,7 @@ async def create_run_route(
                 "projects": projects,
                 "selected_project_id": selected_project_id,
                 "project_default_targets": _project_default_targets(projects),
+                "project_default_envs": _project_default_envs(projects),
                 "project_collect_timeouts": _project_collect_timeouts(projects),
                 "worker_values": WORKER_VALUES,
                 "tb_values": TB_VALUES,
@@ -264,7 +320,7 @@ async def create_run_route(
         )
 
     run = create_run(project.id, project.name, display_path, resolved_path, options)
-    asyncio.create_task(execute_run(run.id))
+    _schedule_run_task(run.id)
     return RedirectResponse(url=f"/runs/{run.id}", status_code=http_status.HTTP_303_SEE_OTHER)
 
 
@@ -651,6 +707,7 @@ async def run_detail(
             "stdout_preview": read_log_preview(run.stdout_path),
             "stderr_preview": read_log_preview(run.stderr_path),
             "display_command": quote_command_for_display(run.command) if run.command else "",
+            "phase_text": _run_phase_text(run),
         },
     )
 
@@ -754,6 +811,30 @@ async def stderr_log(run_id: str):
     return FileResponse(path, media_type="text/plain", filename="stderr.log")
 
 
+@app.post("/api/runs/{run_id}/cancel")
+async def cancel_run(run_id: str):
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.status not in {"queued", "running"}:
+        return {"ok": True, "status": run.status, "message": "运行已结束"}
+
+    task = _RUN_TASKS.get(run_id)
+    if task and not task.done():
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    else:
+        update_run(
+            run_id,
+            status="error",
+            finished_at=utc_now(),
+            return_code=-15,
+            error_message="用户取消运行",
+        )
+    run = get_run(run_id)
+    return {"ok": True, "status": run.status if run else "error", "message": "已取消运行"}
+
+
 @app.get("/api/runs/{run_id}")
 async def run_status(run_id: str):
     run = get_run(run_id)
@@ -770,6 +851,10 @@ async def run_status(run_id: str):
         "finished_at": run.finished_at,
         "duration_seconds": run.duration_seconds,
         "progress": asdict(run.progress),
+        "phase_text": _run_phase_text(run),
+        "stdout_preview": read_log_preview(run.stdout_path),
+        "stderr_preview": read_log_preview(run.stderr_path),
+        "error_message": run.error_message,
         "is_active": run.status in {"queued", "running"},
         "has_allure_results": _directory_has_files(run.allure_results_path),
         "has_allure_report": (Path(run.allure_report_path) / "index.html").exists(),

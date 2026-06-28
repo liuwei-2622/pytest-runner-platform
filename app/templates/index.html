@@ -56,7 +56,7 @@
       <input id="marker" name="marker" value="{{ form.get('marker', '') }}" placeholder="可选，例如 smoke">
     </label>
     <label>
-      本次运行环境变量
+      本次运行环境变量（已预填项目默认值，可按需覆盖）
       <textarea id="env_vars_text" name="env_vars_text" rows="6" placeholder="可选，每行一个 KEY=value&#10;API_BASE_URL=http://127.0.0.1:8000&#10;TOKEN=secret">{{ form.get('env_vars_text', '') }}</textarea>
     </label>
     <div class="env-validation-panel" aria-live="polite">
@@ -151,6 +151,7 @@
   const saveTemplateButton = document.getElementById("save_template_button");
   const deleteTemplateButton = document.getElementById("delete_template_button");
   const projectDefaultTargets = {{ project_default_targets | tojson }};
+  const projectDefaultEnvs = {{ project_default_envs | tojson }};
   const projectCollectTimeouts = {{ project_collect_timeouts | tojson }};
   const collectTimeoutSeconds = {{ collect_timeout_seconds | tojson }};
   const templateById = new Map();
@@ -180,6 +181,10 @@
 
   function defaultTargetForCurrentProject() {
     return projectDefaultTargets[project.value] || ".";
+  }
+
+  function defaultEnvForCurrentProject() {
+    return projectDefaultEnvs[project.value] || "";
   }
 
   function collectTimeoutForCurrentProject() {
@@ -520,8 +525,10 @@
 
   project.addEventListener("change", () => {
     testPath.value = defaultTargetForCurrentProject();
+    envVarsText.value = defaultEnvForCurrentProject();
     loadTemplates();
     loadSuggestions();
+    validateEnvVars();
     refreshPreview();
   });
 

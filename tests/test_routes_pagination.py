@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app import main, storage
-from app.models import RunOptions, utc_now
+from app.models import RunOptions, RunProgress, utc_now
 
 
 def isolate_storage(tmp_path, monkeypatch):
@@ -117,3 +117,35 @@ def test_run_detail_page_renders_paginated_report_cases(tmp_path, monkeypatch):
     assert "test_skip_1" not in response.text
     assert "第 2 / 3 页，共 3 条" in response.text
     assert "第 2 / 2 页，共 2 条" in response.text
+
+
+def test_run_status_api_returns_phase_and_live_log_previews(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    run = storage.create_run("demo", "Demo", "tests", tmp_path / "tests", RunOptions())
+    Path(run.stderr_path).write_text("pytest setup is still running", encoding="utf-8")
+    storage.update_run(run.id, status="running", started_at=utc_now(), progress=RunProgress(updated_at=utc_now()))
+
+    response = TestClient(main.app).get(f"/api/runs/{run.id}")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["phase_text"] == "pytest 启动/环境准备中（已有日志输出）"
+    assert data["stderr_preview"] == "pytest setup is still running"
+    assert data["is_active"] is True
+
+
+def test_cancel_run_api_marks_untracked_active_run_cancelled(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    main._RUN_TASKS.clear()
+    run = storage.create_run("demo", "Demo", "tests", tmp_path / "tests", RunOptions())
+    storage.update_run(run.id, status="running", started_at=utc_now())
+
+    response = TestClient(main.app).post(f"/api/runs/{run.id}/cancel")
+    loaded = storage.get_run(run.id)
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert loaded.status == "error"
+    assert loaded.finished_at is not None
+    assert loaded.return_code == -15
+    assert loaded.error_message == "用户取消运行"

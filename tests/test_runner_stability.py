@@ -125,6 +125,18 @@ class FakeHungProcess:
         return self.returncode
 
 
+class FakeWaitingRunProcess:
+    pid = 12345
+    returncode = None
+    stdout = None
+    stderr = None
+
+    async def wait(self):
+        while self.returncode is None:
+            await asyncio.sleep(0.01)
+        return self.returncode
+
+
 def test_collect_tests_starts_pytest_in_process_group(tmp_path, monkeypatch):
     captured_kwargs = {}
 
@@ -399,6 +411,113 @@ def test_stream_collect_tests_emits_timeout_event(tmp_path, monkeypatch):
     assert events[-1]["event"] == "complete"
     assert events[-1]["timed_out"] is True
     assert events[-1]["ok"] is False
+
+
+def test_stream_collect_tests_terminates_process_when_cancelled(tmp_path, monkeypatch):
+    terminated = []
+
+    async def run_cancelled_collect():
+        process = FakeHangingStreamCollectProcess()
+
+        async def fake_create_subprocess_exec(*command, **kwargs):
+            return process
+
+        async def fake_terminate(target):
+            terminated.append(target)
+            target.returncode = -15
+            target.stdout.feed_eof()
+            target.stderr.feed_eof()
+
+        monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+        monkeypatch.setattr(runner, "_terminate_process_group", fake_terminate)
+        events = runner.stream_collect_tests(make_project(tmp_path), tmp_path, RunOptions())
+        assert await events.__anext__() == {
+            "event": "start",
+            "command": runner.build_pytest_args(
+                project=make_project(tmp_path),
+                test_path=str(tmp_path),
+                options=RunOptions(),
+                report_paths=None,
+                collect_only=True,
+                include_progress_plugin=False,
+            ),
+            "display_command": runner.quote_command_for_display(
+                runner.build_pytest_args(
+                    project=make_project(tmp_path),
+                    test_path=str(tmp_path),
+                    options=RunOptions(),
+                    report_paths=None,
+                    collect_only=True,
+                    include_progress_plugin=False,
+                )
+            ),
+            "timeout_seconds": 20,
+        }
+        next_event = asyncio.create_task(events.__anext__())
+        await asyncio.sleep(0)
+        next_event.cancel()
+        try:
+            await next_event
+        except asyncio.CancelledError:
+            pass
+        await events.aclose()
+
+    asyncio.run(run_cancelled_collect())
+
+    assert len(terminated) == 1
+
+
+def test_execute_run_marks_run_error_when_cancelled(tmp_path, monkeypatch):
+    run = make_run(tmp_path)
+    project = make_project(tmp_path)
+    process = FakeWaitingRunProcess()
+    updates = []
+    started = asyncio.Event()
+    terminated = []
+
+    def fake_update_run(run_id, **changes):
+        updates.append(changes)
+        for key, value in changes.items():
+            setattr(run, key, value)
+        return run
+
+    async def fake_create_subprocess_exec(*command, **kwargs):
+        started.set()
+        return process
+
+    async def fake_terminate(target):
+        terminated.append(target)
+        target.returncode = -15
+
+    async def noop_pump_stream(stream, path):
+        return None
+
+    async def wait_for_stop(run_id, path, stop_event):
+        await stop_event.wait()
+
+    async def cancel_execute_run():
+        monkeypatch.setattr(runner, "get_run", lambda run_id: run)
+        monkeypatch.setattr(runner, "get_project", lambda project_id: project)
+        monkeypatch.setattr(runner, "update_run", fake_update_run)
+        monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+        monkeypatch.setattr(runner, "_terminate_process_group", fake_terminate)
+        monkeypatch.setattr(runner, "_pump_stream", noop_pump_stream)
+        monkeypatch.setattr(runner, "_watch_progress", wait_for_stop)
+        task = asyncio.create_task(runner.execute_run(run.id))
+        await started.wait()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(cancel_execute_run())
+
+    assert terminated == [process]
+    assert updates[-1]["status"] == "error"
+    assert updates[-1]["return_code"] == -15
+    assert updates[-1]["finished_at"] is not None
+    assert updates[-1]["error_message"] == "运行被取消或服务关闭"
 
 
 def test_quote_command_for_display_quotes_spaces_and_shell_chars():
