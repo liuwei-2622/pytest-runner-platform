@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from threading import Lock
 
-from .config import BASE_DIR
+from .config import BASE_DIR, COLLECT_TIMEOUT_SECONDS
 
 PROJECTS_PATH = BASE_DIR / "projects.json"
 PROJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -25,6 +25,7 @@ class ProjectConfig:
     default_args: list[str] = field(default_factory=list)
     default_env: dict[str, str] = field(default_factory=dict)
     report_mode: str = "platform"
+    collect_timeout_seconds: int = COLLECT_TIMEOUT_SECONDS
 
     @classmethod
     def from_dict(cls, data: dict) -> "ProjectConfig":
@@ -38,6 +39,7 @@ class ProjectConfig:
             default_args=list(data.get("default_args", [])),
             default_env=dict(data.get("default_env", {})),
             report_mode=data.get("report_mode", "platform"),
+            collect_timeout_seconds=int(data.get("collect_timeout_seconds", COLLECT_TIMEOUT_SECONDS)),
         )
 
     def to_dict(self) -> dict:
@@ -72,6 +74,7 @@ def default_project() -> ProjectConfig:
         default_args=[],
         default_env={"DEMO_PROJECT_ENV": "ok"},
         report_mode="platform",
+        collect_timeout_seconds=COLLECT_TIMEOUT_SECONDS,
     )
 
 
@@ -123,6 +126,7 @@ def validate_project(project: ProjectConfig) -> ProjectConfig:
         if path.strip()
     ]
     project.report_mode = project.report_mode or "platform"
+    project.collect_timeout_seconds = int(project.collect_timeout_seconds)
 
     if not PROJECT_ID_PATTERN.match(project.id):
         raise ValueError("项目 ID 只能包含字母、数字、下划线和中划线")
@@ -136,6 +140,8 @@ def validate_project(project: ProjectConfig) -> ProjectConfig:
         raise ValueError("Python 解释器不存在")
     if project.report_mode != "platform":
         raise ValueError("当前仅支持 platform 报告模式")
+    if project.collect_timeout_seconds < 5 or project.collect_timeout_seconds > 3600:
+        raise ValueError("收集超时秒数必须在 5 到 3600 之间")
     if not project.allowed_test_roots:
         raise ValueError("至少需要一个允许测试目录")
 

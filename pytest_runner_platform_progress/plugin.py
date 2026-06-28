@@ -5,8 +5,12 @@ import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from time import monotonic
 
 import pytest
+
+
+PROGRESS_WRITE_INTERVAL_SECONDS = 0.5
 
 
 @dataclass
@@ -37,13 +41,16 @@ class ProgressReporter:
             "xfailed": 0,
             "xpassed": 0,
         }
+        self._last_write_at: float | None = None
+        self._dirty = False
 
     def set_collected(self, count: int) -> None:
         if self.collected is None:
             self.collected = count
         else:
             self.collected = max(self.collected, count)
-        self.write()
+        self._dirty = True
+        self.maybe_write(force=True)
 
     def add_report(self, report) -> None:
         self.reports.setdefault(report.nodeid, []).append(report)
@@ -54,7 +61,8 @@ class ProgressReporter:
         self.completed.add(nodeid)
         outcome = self._classify(self.reports.pop(nodeid, []))
         self.counts[outcome] += 1
-        self.write()
+        self._dirty = True
+        self.maybe_write()
 
     def _classify(self, reports: list) -> str:
         if any(report.failed and report.when in {"setup", "teardown"} for report in reports):
@@ -89,11 +97,21 @@ class ProgressReporter:
             updated_at=datetime.now(timezone.utc).isoformat(),
         )
 
+    def maybe_write(self, force: bool = False) -> None:
+        if force:
+            if self._dirty or self._last_write_at is None:
+                self.write()
+            return
+        if self._last_write_at is None or monotonic() - self._last_write_at >= PROGRESS_WRITE_INTERVAL_SECONDS:
+            self.write()
+
     def write(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self.path.with_suffix(".json.tmp")
         tmp_path.write_text(json.dumps(asdict(self.snapshot()), ensure_ascii=False), encoding="utf-8")
         tmp_path.replace(self.path)
+        self._last_write_at = monotonic()
+        self._dirty = False
 
 
 _REPORTER: ProgressReporter | None = None
@@ -128,3 +146,13 @@ def pytest_runtest_logreport(report):
 def pytest_runtest_logfinish(nodeid, location):
     if _REPORTER:
         _REPORTER.finish(nodeid)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    if _REPORTER:
+        _REPORTER.maybe_write(force=True)
+
+
+def pytest_unconfigure(config):
+    if _REPORTER:
+        _REPORTER.maybe_write(force=True)

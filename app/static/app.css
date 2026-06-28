@@ -422,6 +422,38 @@ td code {
   text-decoration: none;
 }
 
+.pagination {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.pagination a,
+.pagination-disabled {
+  border-radius: var(--radius-pill);
+  font-size: 13px;
+  font-weight: 850;
+  padding: 8px 12px;
+}
+
+.pagination a {
+  background: #e9f5fd;
+  border: 1px solid rgba(34, 167, 240, 0.18);
+  color: #116da7;
+}
+
+.pagination a:hover {
+  background: #dff1fc;
+  text-decoration: none;
+}
+
+.pagination-disabled {
+  background: rgba(109, 124, 134, 0.12);
+  color: var(--deck-muted);
+}
+
 .code,
 .log {
   background:

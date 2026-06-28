@@ -2,18 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import zipfile
 from dataclasses import asdict
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, Form, HTTPException, Request, status as http_status
-from fastapi.responses import FileResponse, RedirectResponse, Response
+from fastapi import FastAPI, Form, HTTPException, Query, Request, status as http_status
+from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .config import ALLOWED_TB_VALUES, BASE_DIR, COLLECT_TIMEOUT_SECONDS
-from .discovery import list_test_target_suggestions
+from .test_target_index import TestTargetIndexCache
 from .history import build_history_summary
 from .models import RunTemplate, utc_now
 from .projects import (
@@ -26,9 +27,9 @@ from .projects import (
 )
 from .reports import report_for_run
 from .run_templates import delete_run_template, list_run_templates, save_run_template
-from .runner import build_preview_command, collect_tests, execute_run, quote_command_for_display
+from .runner import build_preview_command, collect_tests, execute_run, quote_command_for_display, stream_collect_tests
 from .security import env_var_keys_from_text, validate_env_vars, validate_env_vars_detailed, validate_options, validate_test_path
-from .storage import artifact_path, create_run, get_run, list_runs, read_log_preview, recover_stale_runs
+from .storage import artifact_path, count_runs, create_run, get_run, list_runs, read_log_preview, recover_stale_runs
 
 app = FastAPI(title="pytest-runner-platform")
 
@@ -40,6 +41,7 @@ async def recover_stale_runs_on_startup():
 
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "app/static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "app/templates"))
+test_target_index_cache = TestTargetIndexCache()
 WORKER_VALUES = ["disabled", "auto", "1", "2", "4", "8"]
 TB_VALUES = [value for value in ["auto", "long", "short", "line", "native", "no"] if value in ALLOWED_TB_VALUES]
 
@@ -54,6 +56,7 @@ def _project_form(project: ProjectConfig | None = None) -> dict:
             "allowed_test_roots": "",
             "default_args": "",
             "default_env": "",
+            "collect_timeout_seconds": COLLECT_TIMEOUT_SECONDS,
         }
     return {
         "id": project.id,
@@ -65,6 +68,7 @@ def _project_form(project: ProjectConfig | None = None) -> dict:
         "default_args": "\n".join(project.default_args),
         "default_env": "\n".join(f"{key}={value}" for key, value in project.default_env.items()),
         "report_mode": project.report_mode,
+        "collect_timeout_seconds": project.collect_timeout_seconds,
     }
 
 
@@ -97,6 +101,27 @@ def _zip_directory(directory: str) -> bytes | None:
             if path.is_file():
                 archive.write(path, path.relative_to(root))
     return buffer.getvalue()
+
+
+def _pagination(page: int, page_size: int, total: int) -> dict:
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    current_page = min(max(page, 1), total_pages)
+    return {
+        "page": current_page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages,
+        "offset": (current_page - 1) * page_size if total else 0,
+        "has_prev": current_page > 1,
+        "has_next": current_page < total_pages,
+        "prev_page": current_page - 1 if current_page > 1 else None,
+        "next_page": current_page + 1 if current_page < total_pages else None,
+    }
+
+
+def _page_items(items: list, pagination: dict) -> list:
+    start = pagination["offset"]
+    return items[start:start + pagination["page_size"]]
 
 
 def _validate_run_form(
@@ -143,6 +168,14 @@ def _project_default_targets(projects: list[ProjectConfig]) -> dict[str, str]:
     return {project.id: _project_default_test_target(project) for project in projects}
 
 
+def _project_collect_timeouts(projects: list[ProjectConfig]) -> dict[str, int]:
+    return {project.id: project.collect_timeout_seconds for project in projects}
+
+
+def _ndjson_event(data: dict) -> str:
+    return json.dumps(data, ensure_ascii=False) + "\n"
+
+
 @app.get("/")
 async def index(request: Request, project_id: str | None = None):
     projects = list_projects()
@@ -156,9 +189,10 @@ async def index(request: Request, project_id: str | None = None):
             "projects": projects,
             "selected_project_id": selected_project_id,
             "project_default_targets": _project_default_targets(projects),
+            "project_collect_timeouts": _project_collect_timeouts(projects),
             "worker_values": WORKER_VALUES,
             "tb_values": TB_VALUES,
-            "collect_timeout_seconds": COLLECT_TIMEOUT_SECONDS,
+            "collect_timeout_seconds": selected_project.collect_timeout_seconds,
             "form": {
                 "project_id": selected_project_id,
                 "test_path": _project_default_test_target(selected_project),
@@ -220,9 +254,10 @@ async def create_run_route(
                 "projects": projects,
                 "selected_project_id": selected_project_id,
                 "project_default_targets": _project_default_targets(projects),
+                "project_collect_timeouts": _project_collect_timeouts(projects),
                 "worker_values": WORKER_VALUES,
                 "tb_values": TB_VALUES,
-                "collect_timeout_seconds": COLLECT_TIMEOUT_SECONDS,
+                "collect_timeout_seconds": (get_project(selected_project_id) or projects[0]).collect_timeout_seconds,
                 "form": form,
             },
             status_code=http_status.HTTP_400_BAD_REQUEST,
@@ -245,7 +280,7 @@ async def test_targets(project_id: str, q: str = ""):
         raise HTTPException(status_code=404, detail="Project not found")
     return {
         "project_id": project.id,
-        "suggestions": list_test_target_suggestions(project, q[:512]),
+        "suggestions": await test_target_index_cache.get_suggestions(project, q[:512]),
     }
 
 
@@ -331,6 +366,45 @@ async def collect_route(
             "timed_out": False,
         }
     return await collect_tests(project, resolved_path, options)
+
+
+@app.post("/api/collect/stream")
+async def collect_stream_route(
+    project_id: str = Form(""),
+    test_path: str = Form("."),
+    keyword: str = Form(""),
+    marker: str = Form(""),
+    verbosity: str = Form("normal"),
+    maxfail: str = Form(""),
+    workers: str = Form("disabled"),
+    env_vars_text: str = Form(""),
+    last_failed: bool = Form(False),
+    failed_first: bool = Form(False),
+    tb: str = Form("auto"),
+):
+    async def events():
+        try:
+            project, _display_path, resolved_path, options = _validate_run_form(
+                project_id,
+                test_path,
+                keyword,
+                marker,
+                verbosity,
+                maxfail,
+                workers,
+                env_vars_text,
+                last_failed,
+                failed_first,
+                tb,
+            )
+        except ValueError as exc:
+            yield _ndjson_event({"event": "error", "ok": False, "error": str(exc)})
+            return
+
+        async for event in stream_collect_tests(project, resolved_path, options):
+            yield _ndjson_event(event)
+
+    return StreamingResponse(events(), media_type="application/x-ndjson")
 
 
 @app.get("/api/run-templates")
@@ -419,6 +493,7 @@ async def create_project_route(
     default_args: str = Form(""),
     default_env: str = Form(""),
     report_mode: str = Form("platform"),
+    collect_timeout_seconds: int = Form(COLLECT_TIMEOUT_SECONDS),
 ):
     form = locals().copy()
     form.pop("request")
@@ -434,8 +509,10 @@ async def create_project_route(
             default_args=_split_lines(default_args),
             default_env=env,
             report_mode=report_mode,
+            collect_timeout_seconds=collect_timeout_seconds,
         )
         upsert_project(project)
+        test_target_index_cache.invalidate(project.id)
     except ValueError as exc:
         return templates.TemplateResponse(
             request,
@@ -470,6 +547,7 @@ async def update_project_route(
     default_args: str = Form(""),
     default_env: str = Form(""),
     report_mode: str = Form("platform"),
+    collect_timeout_seconds: int = Form(COLLECT_TIMEOUT_SECONDS),
 ):
     form = locals().copy()
     form.pop("request")
@@ -486,8 +564,10 @@ async def update_project_route(
             default_args=_split_lines(default_args),
             default_env=env,
             report_mode=report_mode,
+            collect_timeout_seconds=collect_timeout_seconds,
         )
         upsert_project(project)
+        test_target_index_cache.invalidate(project.id)
     except ValueError as exc:
         return templates.TemplateResponse(
             request,
@@ -502,6 +582,7 @@ async def update_project_route(
 async def delete_project_route(request: Request, project_id: str):
     try:
         delete_project(project_id)
+        test_target_index_cache.invalidate(project_id)
     except ValueError as exc:
         return templates.TemplateResponse(
             request,
@@ -513,30 +594,47 @@ async def delete_project_route(request: Request, project_id: str):
 
 
 @app.get("/runs")
-async def runs(request: Request):
+async def runs(request: Request, page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100)):
+    total = count_runs()
+    pagination = _pagination(page, page_size, total)
+    page_runs = list_runs(limit=pagination["page_size"], offset=pagination["offset"])
     all_runs = list_runs()
     return templates.TemplateResponse(
         request,
         "runs.html",
-        {"runs": all_runs, "history": build_history_summary(all_runs)},
+        {"runs": page_runs, "history": build_history_summary(all_runs), "pagination": pagination},
     )
 
 
 @app.get("/api/runs")
-async def runs_api():
+async def runs_api(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100)):
+    total = count_runs()
+    pagination = _pagination(page, page_size, total)
+    page_runs = list_runs(limit=pagination["page_size"], offset=pagination["offset"])
     all_runs = list_runs()
     return {
-        "runs": [run.to_dict() for run in all_runs],
+        "runs": [run.to_dict() for run in page_runs],
         "history": asdict(build_history_summary(all_runs)),
+        "pagination": pagination,
     }
 
 
 @app.get("/runs/{run_id}")
-async def run_detail(request: Request, run_id: str):
+async def run_detail(
+    request: Request,
+    run_id: str,
+    failed_page: int = Query(1, ge=1),
+    failed_page_size: int = Query(25, ge=1, le=100),
+    skipped_page: int = Query(1, ge=1),
+    skipped_page_size: int = Query(20, ge=1, le=100),
+):
     run = get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     project = get_project(run.project_id)
+    report = report_for_run(run)
+    failed_pagination = _pagination(failed_page, failed_page_size, len(report.failed_cases))
+    skipped_pagination = _pagination(skipped_page, skipped_page_size, len(report.skipped_cases))
     return templates.TemplateResponse(
         request,
         "run_detail.html",
@@ -545,7 +643,11 @@ async def run_detail(request: Request, run_id: str):
             "project": project,
             "has_allure_results": _directory_has_files(run.allure_results_path),
             "has_allure_report": (Path(run.allure_report_path) / "index.html").exists(),
-            "report": report_for_run(run),
+            "report": report,
+            "failed_cases": _page_items(report.failed_cases, failed_pagination),
+            "skipped_cases": _page_items(report.skipped_cases, skipped_pagination),
+            "failed_pagination": failed_pagination,
+            "skipped_pagination": skipped_pagination,
             "stdout_preview": read_log_preview(run.stdout_path),
             "stderr_preview": read_log_preview(run.stderr_path),
             "display_command": quote_command_for_display(run.command) if run.command else "",
@@ -554,11 +656,33 @@ async def run_detail(request: Request, run_id: str):
 
 
 @app.get("/api/runs/{run_id}/report")
-async def run_report(run_id: str):
+async def run_report(
+    run_id: str,
+    failed_page: int = Query(1, ge=1),
+    failed_page_size: int = Query(25, ge=1, le=100),
+    skipped_page: int = Query(1, ge=1),
+    skipped_page_size: int = Query(20, ge=1, le=100),
+):
     run = get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
-    return asdict(report_for_run(run))
+    report = report_for_run(run)
+    failed_pagination = _pagination(failed_page, failed_page_size, len(report.failed_cases))
+    skipped_pagination = _pagination(skipped_page, skipped_page_size, len(report.skipped_cases))
+    return {
+        "exists": report.exists,
+        "total": report.total,
+        "passed": report.passed,
+        "failed": report.failed,
+        "errors": report.errors,
+        "skipped": report.skipped,
+        "time_seconds": report.time_seconds,
+        "error_message": report.error_message,
+        "failed_cases": [asdict(case) for case in _page_items(report.failed_cases, failed_pagination)],
+        "skipped_cases": [asdict(case) for case in _page_items(report.skipped_cases, skipped_pagination)],
+        "failed_pagination": failed_pagination,
+        "skipped_pagination": skipped_pagination,
+    }
 
 
 @app.get("/runs/{run_id}/reports/pytest.html")

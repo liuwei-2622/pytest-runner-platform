@@ -43,6 +43,10 @@
       <textarea name="default_env" rows="5" placeholder="可选，每行一个 KEY=value">{{ form.get('default_env', '') }}</textarea>
     </label>
     <label>
+      收集超时秒数
+      <input name="collect_timeout_seconds" type="number" min="5" max="3600" value="{{ form.get('collect_timeout_seconds', 20) }}" required>
+    </label>
+    <label>
       报告模式
       <select name="report_mode">
         <option value="platform" {% if form.get('report_mode', 'platform') == 'platform' %}selected{% endif %}>platform</option>

@@ -63,6 +63,19 @@
 
   {% if runs %}
     <h2>全部运行</h2>
+    <div class="pagination">
+      {% if pagination.has_prev %}
+        <a href="/runs?page={{ pagination.prev_page }}&page_size={{ pagination.page_size }}">上一页</a>
+      {% else %}
+        <span class="pagination-disabled">上一页</span>
+      {% endif %}
+      <span class="muted">第 {{ pagination.page }} / {{ pagination.total_pages }} 页，共 {{ pagination.total }} 条，每页 {{ pagination.page_size }} 条</span>
+      {% if pagination.has_next %}
+        <a href="/runs?page={{ pagination.next_page }}&page_size={{ pagination.page_size }}">下一页</a>
+      {% else %}
+        <span class="pagination-disabled">下一页</span>
+      {% endif %}
+    </div>
     <table>
       <thead>
         <tr>
@@ -89,6 +102,19 @@
         {% endfor %}
       </tbody>
     </table>
+    <div class="pagination">
+      {% if pagination.has_prev %}
+        <a href="/runs?page={{ pagination.prev_page }}&page_size={{ pagination.page_size }}">上一页</a>
+      {% else %}
+        <span class="pagination-disabled">上一页</span>
+      {% endif %}
+      <span class="muted">第 {{ pagination.page }} / {{ pagination.total_pages }} 页，共 {{ pagination.total }} 条</span>
+      {% if pagination.has_next %}
+        <a href="/runs?page={{ pagination.next_page }}&page_size={{ pagination.page_size }}">下一页</a>
+      {% else %}
+        <span class="pagination-disabled">下一页</span>
+      {% endif %}
+    </div>
   {% else %}
     <p class="muted">暂无运行记录。</p>
   {% endif %}

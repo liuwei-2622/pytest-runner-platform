@@ -7,7 +7,7 @@ from app.models import RunOptions, RunProgress, TestRun as _TestRun, utc_now
 from app.projects import ProjectConfig
 
 
-def make_project(tmp_path: Path) -> ProjectConfig:
+def make_project(tmp_path: Path, collect_timeout_seconds=20) -> ProjectConfig:
     return ProjectConfig(
         id="demo",
         name="Demo",
@@ -15,6 +15,7 @@ def make_project(tmp_path: Path) -> ProjectConfig:
         python_executable="python3",
         working_directory=str(tmp_path),
         allowed_test_roots=[str(tmp_path)],
+        collect_timeout_seconds=collect_timeout_seconds,
     )
 
 
@@ -49,6 +50,52 @@ class FakeCollectProcess:
 
     async def communicate(self):
         return b"collected 1 item", b""
+
+
+class FakeSlowCollectProcess:
+    returncode = None
+
+    def __init__(self):
+        self.calls = 0
+
+    async def communicate(self):
+        self.calls += 1
+        if self.calls == 1:
+            await asyncio.sleep(1)
+        return b"", b""
+
+
+class FakeStreamCollectProcess:
+    pid = 12345
+
+    def __init__(self, stdout: bytes = b"", stderr: bytes = b"", returncode: int = 0):
+        self.returncode = None
+        self._final_returncode = returncode
+        self.stdout = asyncio.StreamReader()
+        self.stderr = asyncio.StreamReader()
+        self.stdout.feed_data(stdout)
+        self.stdout.feed_eof()
+        self.stderr.feed_data(stderr)
+        self.stderr.feed_eof()
+
+    async def wait(self):
+        await asyncio.sleep(0)
+        self.returncode = self._final_returncode
+        return self.returncode
+
+
+class FakeHangingStreamCollectProcess:
+    pid = 12345
+    returncode = None
+
+    def __init__(self):
+        self.stdout = asyncio.StreamReader()
+        self.stderr = asyncio.StreamReader()
+
+    async def wait(self):
+        while self.returncode is None:
+            await asyncio.sleep(0.01)
+        return self.returncode
 
 
 class FakeRunProcess:
@@ -290,6 +337,68 @@ def test_collect_tests_returns_structured_error_when_subprocess_start_fails(tmp_
     assert "missing-python" in result["stderr"]
     assert result["timed_out"] is False
     assert result["error"] == result["stderr"]
+
+
+def test_collect_tests_uses_project_timeout(tmp_path, monkeypatch):
+    async def fake_create_subprocess_exec(*command, **kwargs):
+        return FakeSlowCollectProcess()
+
+    async def fake_terminate(process):
+        process.returncode = -9
+
+    monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(runner, "_terminate_process_group", fake_terminate)
+
+    result = asyncio.run(runner.collect_tests(make_project(tmp_path, collect_timeout_seconds=0.001), tmp_path, RunOptions()))
+
+    assert result["ok"] is False
+    assert result["timed_out"] is True
+    assert "0.001" in result["error"]
+    assert "Collect timed out after 0.001 seconds" in result["stderr"]
+
+
+def test_stream_collect_tests_emits_output_and_complete_events(tmp_path, monkeypatch):
+    async def fake_create_subprocess_exec(*command, **kwargs):
+        return FakeStreamCollectProcess(b"collected 2 items\n", b"warning\n")
+
+    async def collect_events():
+        monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+        return [event async for event in runner.stream_collect_tests(make_project(tmp_path), tmp_path, RunOptions())]
+
+    events = asyncio.run(collect_events())
+
+    assert [event["event"] for event in events] == ["start", "stdout", "stderr", "complete"]
+    assert events[0]["timeout_seconds"] == 20
+    assert events[1]["text"] == "collected 2 items\n"
+    assert events[2]["text"] == "warning\n"
+    assert events[-1]["ok"] is True
+    assert events[-1]["collected_count"] == 2
+
+
+def test_stream_collect_tests_emits_timeout_event(tmp_path, monkeypatch):
+    async def fake_terminate(target):
+        target.returncode = -9
+        target.stdout.feed_eof()
+        target.stderr.feed_eof()
+
+    async def collect_events():
+        process = FakeHangingStreamCollectProcess()
+
+        async def fake_create_subprocess_exec(*command, **kwargs):
+            return process
+
+        monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+        monkeypatch.setattr(runner, "_terminate_process_group", fake_terminate)
+        return [event async for event in runner.stream_collect_tests(make_project(tmp_path, collect_timeout_seconds=0), tmp_path, RunOptions())]
+
+    events = asyncio.run(collect_events())
+
+    assert events[0]["event"] == "start"
+    assert events[-2]["event"] == "stderr"
+    assert "Collect timed out after 0 seconds" in events[-2]["text"]
+    assert events[-1]["event"] == "complete"
+    assert events[-1]["timed_out"] is True
+    assert events[-1]["ok"] is False
 
 
 def test_quote_command_for_display_quotes_spaces_and_shell_chars():

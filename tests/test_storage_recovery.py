@@ -2,8 +2,14 @@ from app import storage
 from app.models import RunOptions, utc_now
 
 
-def test_recover_stale_runs_marks_queued_and_running_as_error(tmp_path, monkeypatch):
+def isolate_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "REPORTS_DIR", tmp_path / "reports")
+    monkeypatch.setattr(storage, "RUN_METADATA_DB", tmp_path / "runs.sqlite3")
+    storage._initialized_storage.clear()
+
+
+def test_recover_stale_runs_marks_queued_and_running_as_error(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
 
     queued = storage.create_run("demo", "Demo", "tests", tmp_path / "tests", RunOptions())
     running = storage.create_run("demo", "Demo", "tests", tmp_path / "tests", RunOptions())

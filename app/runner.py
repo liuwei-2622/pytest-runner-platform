@@ -12,7 +12,6 @@ from pathlib import Path
 
 from .config import (
     BASE_DIR,
-    COLLECT_TIMEOUT_SECONDS,
     MAX_COLLECT_OUTPUT_BYTES,
     MAX_CONCURRENT_RUNS,
     REPORT_PLUGIN_MODE,
@@ -273,6 +272,14 @@ def _report_plugin_error_message(stderr_path: str) -> str:
     return "报告插件参数不被目标 pytest 环境识别，请安装 pytest-html/allure-pytest，或设置 PYTEST_PLATFORM_REPORT_PLUGIN_MODE=auto/builtin"
 
 
+async def _read_collect_output(kind: str, stream: asyncio.StreamReader | None, queue: asyncio.Queue, chunks: list[bytes]) -> None:
+    if not stream:
+        return
+    while chunk := await stream.read(8192):
+        chunks.append(chunk)
+        await queue.put({"event": kind, "text": chunk.decode("utf-8", errors="replace")})
+
+
 async def collect_tests(project: ProjectConfig, resolved_path: Path, options: RunOptions) -> dict:
     command = build_pytest_args(
         project=project,
@@ -304,19 +311,20 @@ async def collect_tests(project: ProjectConfig, resolved_path: Path, options: Ru
             "timed_out": False,
             "error": error,
         }
+    timeout_seconds = project.collect_timeout_seconds
     timed_out = False
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=COLLECT_TIMEOUT_SECONDS)
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
     except asyncio.TimeoutError:
         timed_out = True
         await _terminate_process_group(process)
         stdout, stderr = await process.communicate()
-        stderr += f"\nCollect timed out after {COLLECT_TIMEOUT_SECONDS} seconds.\n".encode()
+        stderr += f"\nCollect timed out after {timeout_seconds} seconds.\n".encode()
 
     stdout_text = _trim_output(stdout)
     stderr_text = _trim_output(stderr)
     collected_count = _parse_collected_count(f"{stdout_text}\n{stderr_text}")
-    error = f"收集测试超过 {COLLECT_TIMEOUT_SECONDS} 秒后超时" if timed_out else ""
+    error = f"收集测试超过 {timeout_seconds} 秒后超时" if timed_out else ""
 
     return {
         "ok": process.returncode == 0 and not timed_out,
@@ -328,6 +336,100 @@ async def collect_tests(project: ProjectConfig, resolved_path: Path, options: Ru
         "stderr": stderr_text,
         "timed_out": timed_out,
         "error": error,
+    }
+
+
+async def stream_collect_tests(project: ProjectConfig, resolved_path: Path, options: RunOptions):
+    command = build_pytest_args(
+        project=project,
+        test_path=str(resolved_path),
+        options=options,
+        report_paths=None,
+        collect_only=True,
+        include_progress_plugin=False,
+    )
+    yield {
+        "event": "start",
+        "command": command,
+        "display_command": quote_command_for_display(command),
+        "timeout_seconds": project.collect_timeout_seconds,
+    }
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            cwd=str(project.working_dir),
+            env=_base_pytest_env(project, options),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            **_process_group_kwargs(),
+        )
+    except OSError as exc:
+        error = f"收集测试启动失败: {type(exc).__name__}: {exc}"
+        yield {
+            "event": "error",
+            "ok": False,
+            "return_code": None,
+            "collected_count": None,
+            "timed_out": False,
+            "error": error,
+            "stderr": error,
+        }
+        return
+
+    queue: asyncio.Queue = asyncio.Queue()
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+    stdout_task = asyncio.create_task(_read_collect_output("stdout", process.stdout, queue, stdout_chunks))
+    stderr_task = asyncio.create_task(_read_collect_output("stderr", process.stderr, queue, stderr_chunks))
+    wait_task = asyncio.create_task(process.wait())
+    tasks = {stdout_task, stderr_task, wait_task}
+    timeout_seconds = project.collect_timeout_seconds
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    timed_out = False
+
+    try:
+        while tasks:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0 and not wait_task.done():
+                timed_out = True
+                await _terminate_process_group(process)
+                break
+
+            done, tasks = await asyncio.wait(
+                tasks,
+                timeout=max(0.05, min(0.2, remaining)),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            while not queue.empty():
+                yield await queue.get()
+
+            if not done and remaining <= 0 and not wait_task.done():
+                timed_out = True
+                await _terminate_process_group(process)
+                break
+    finally:
+        await asyncio.gather(stdout_task, stderr_task, wait_task, return_exceptions=True)
+
+    while not queue.empty():
+        yield await queue.get()
+
+    if timed_out:
+        timeout_message = f"\nCollect timed out after {timeout_seconds} seconds.\n"
+        stderr_chunks.append(timeout_message.encode())
+        yield {"event": "stderr", "text": timeout_message}
+
+    stdout_text = _trim_output(b"".join(stdout_chunks))
+    stderr_text = _trim_output(b"".join(stderr_chunks))
+    collected_count = _parse_collected_count(f"{stdout_text}\n{stderr_text}")
+    error = f"收集测试超过 {timeout_seconds} 秒后超时" if timed_out else ""
+    yield {
+        "event": "complete",
+        "ok": process.returncode == 0 and not timed_out,
+        "return_code": process.returncode,
+        "collected_count": collected_count,
+        "timed_out": timed_out,
+        "error": error,
+        "timeout_seconds": timeout_seconds,
     }
 
 

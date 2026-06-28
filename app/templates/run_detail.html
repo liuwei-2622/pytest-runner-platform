@@ -82,6 +82,19 @@
 
     {% if report.failed_cases %}
       <h3>失败与错误用例</h3>
+      <div class="pagination">
+        {% if failed_pagination.has_prev %}
+          <a href="/runs/{{ run.id }}?failed_page={{ failed_pagination.prev_page }}&failed_page_size={{ failed_pagination.page_size }}&skipped_page={{ skipped_pagination.page }}&skipped_page_size={{ skipped_pagination.page_size }}">上一页</a>
+        {% else %}
+          <span class="pagination-disabled">上一页</span>
+        {% endif %}
+        <span class="muted">第 {{ failed_pagination.page }} / {{ failed_pagination.total_pages }} 页，共 {{ failed_pagination.total }} 条</span>
+        {% if failed_pagination.has_next %}
+          <a href="/runs/{{ run.id }}?failed_page={{ failed_pagination.next_page }}&failed_page_size={{ failed_pagination.page_size }}&skipped_page={{ skipped_pagination.page }}&skipped_page_size={{ skipped_pagination.page_size }}">下一页</a>
+        {% else %}
+          <span class="pagination-disabled">下一页</span>
+        {% endif %}
+      </div>
       <table>
         <thead>
           <tr>
@@ -92,7 +105,7 @@
           </tr>
         </thead>
         <tbody>
-          {% for case in report.failed_cases %}
+          {% for case in failed_cases %}
             <tr>
               <td><span class="badge badge-{{ 'failed' if case.outcome == 'failed' else 'error' }}">{{ case.outcome }}</span></td>
               <td>
@@ -114,6 +127,19 @@
 
     {% if report.skipped_cases %}
       <h3>跳过用例</h3>
+      <div class="pagination">
+        {% if skipped_pagination.has_prev %}
+          <a href="/runs/{{ run.id }}?failed_page={{ failed_pagination.page }}&failed_page_size={{ failed_pagination.page_size }}&skipped_page={{ skipped_pagination.prev_page }}&skipped_page_size={{ skipped_pagination.page_size }}">上一页</a>
+        {% else %}
+          <span class="pagination-disabled">上一页</span>
+        {% endif %}
+        <span class="muted">第 {{ skipped_pagination.page }} / {{ skipped_pagination.total_pages }} 页，共 {{ skipped_pagination.total }} 条</span>
+        {% if skipped_pagination.has_next %}
+          <a href="/runs/{{ run.id }}?failed_page={{ failed_pagination.page }}&failed_page_size={{ failed_pagination.page_size }}&skipped_page={{ skipped_pagination.next_page }}&skipped_page_size={{ skipped_pagination.page_size }}">下一页</a>
+        {% else %}
+          <span class="pagination-disabled">下一页</span>
+        {% endif %}
+      </div>
       <table>
         <thead>
           <tr>
@@ -122,7 +148,7 @@
           </tr>
         </thead>
         <tbody>
-          {% for case in report.skipped_cases[:20] %}
+          {% for case in skipped_cases %}
             <tr>
               <td><code>{{ case.classname }}::{{ case.name }}</code></td>
               <td>{{ case.message or case.details or '-' }}</td>
@@ -130,9 +156,6 @@
           {% endfor %}
         </tbody>
       </table>
-      {% if report.skipped_cases|length > 20 %}
-        <p class="muted">仅显示前 20 个跳过用例。</p>
-      {% endif %}
     {% endif %}
   {% elif report.error_message %}
     <div class="alert">{{ report.error_message }}</div>

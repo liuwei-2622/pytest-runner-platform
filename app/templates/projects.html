@@ -16,6 +16,7 @@
         <th>名称</th>
         <th>根目录</th>
         <th>Python</th>
+        <th>收集超时</th>
         <th>操作</th>
       </tr>
     </thead>
@@ -26,6 +27,7 @@
           <td>{{ project.name }}</td>
           <td><code>{{ project.root_path }}</code></td>
           <td><code>{{ project.python_executable }}</code></td>
+          <td>{{ project.collect_timeout_seconds }}s</td>
           <td class="actions">
             <a href="/?project_id={{ project.id }}">运行</a>
             <a href="/projects/{{ project.id }}/edit">编辑</a>

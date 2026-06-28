@@ -112,25 +112,25 @@ def _nodeid_suggestions(path: Path, relative_path: str) -> list[dict]:
     return suggestions
 
 
-def list_test_target_suggestions(project: ProjectConfig, query: str = "", limit: int = 50) -> list[dict]:
-    query = query.strip()[:512]
+def build_test_target_index(project: ProjectConfig) -> list[dict]:
     allowed_roots = project.allowed_roots
     suggestions: list[dict] = []
     seen: set[str] = set()
     scanned_files = 0
+    index_limit = 1_000_000
 
     for allowed_root in allowed_roots:
         if not _is_allowed(allowed_root, allowed_roots) or not allowed_root.exists():
             continue
         for path in _iter_discovery_paths(allowed_root):
-            if len(suggestions) >= limit or scanned_files >= MAX_SCAN_FILES:
+            if scanned_files >= MAX_SCAN_FILES:
                 break
             if path.is_dir():
                 if not _is_allowed(path, allowed_roots):
                     continue
                 relative = _relative_value(project, path)
                 if relative:
-                    _add_suggestion(suggestions, seen, relative, f"{relative}/", "directory", query, limit)
+                    _add_suggestion(suggestions, seen, relative, f"{relative}/", "directory", "", index_limit)
                 continue
             if not _is_test_file(path) or not _is_allowed(path, allowed_roots):
                 continue
@@ -138,7 +138,7 @@ def list_test_target_suggestions(project: ProjectConfig, query: str = "", limit:
             relative = _relative_value(project, path)
             if not relative:
                 continue
-            _add_suggestion(suggestions, seen, relative, relative, "file", query, limit)
+            _add_suggestion(suggestions, seen, relative, relative, "file", "", index_limit)
             for suggestion in _nodeid_suggestions(path, relative):
                 _add_suggestion(
                     suggestions,
@@ -146,8 +146,29 @@ def list_test_target_suggestions(project: ProjectConfig, query: str = "", limit:
                     suggestion["value"],
                     suggestion["label"],
                     suggestion["kind"],
-                    query,
-                    limit,
+                    "",
+                    index_limit,
                 )
 
     return suggestions
+
+
+def filter_test_target_suggestions(suggestions: list[dict], query: str = "", limit: int = 50) -> list[dict]:
+    query = query.strip()[:512]
+    filtered: list[dict] = []
+    seen: set[str] = set()
+    for suggestion in suggestions:
+        _add_suggestion(
+            filtered,
+            seen,
+            suggestion["value"],
+            suggestion["label"],
+            suggestion["kind"],
+            query,
+            limit,
+        )
+    return filtered
+
+
+def list_test_target_suggestions(project: ProjectConfig, query: str = "", limit: int = 50) -> list[dict]:
+    return filter_test_target_suggestions(build_test_target_index(project), query, limit)

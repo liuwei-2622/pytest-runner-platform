@@ -4,6 +4,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parents[1]
 WORKSPACE_DIR = BASE_DIR / "tests_workspace"
 REPORTS_DIR = BASE_DIR / "reports"
+RUN_METADATA_DB = Path(os.getenv("PYTEST_PLATFORM_RUN_METADATA_DB", str(REPORTS_DIR / "runs.sqlite3")))
 
 
 def default_max_workers(cpu_count: int | None = None) -> int:
