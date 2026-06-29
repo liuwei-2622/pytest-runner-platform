@@ -21,6 +21,8 @@ class DeleteRunsResult:
     deleted: int = 0
     skipped_active: int = 0
     missing: int = 0
+    skipped_invalid_report_dir: int = 0
+    artifact_delete_failed: int = 0
 
 
 SCHEMA = """
@@ -334,11 +336,12 @@ def count_runs() -> int:
         return int(conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0])
 
 
-def _safe_report_dir_for_delete(report_dir: str) -> Path:
+def _safe_report_dir_for_delete(run_id: str, report_dir: str) -> Path:
     reports_root = REPORTS_DIR.resolve()
     target = Path(report_dir).resolve()
-    if reports_root not in target.parents:
-        raise ValueError(f"Refusing to delete report directory outside reports directory: {target}")
+    expected = (reports_root / run_id).resolve()
+    if target != expected or target.parent != reports_root:
+        raise ValueError(f"Refusing to delete invalid report directory for run {run_id}: {target}")
     return target
 
 
@@ -352,7 +355,18 @@ def format_delete_runs_message(result: DeleteRunsResult) -> str:
         parts.append(f"跳过 {result.skipped_active} 条运行中记录")
     if result.missing:
         parts.append(f"忽略 {result.missing} 条不存在记录")
+    if result.skipped_invalid_report_dir:
+        parts.append(f"跳过 {result.skipped_invalid_report_dir} 条报告目录异常记录")
+    if result.artifact_delete_failed:
+        parts.append(f"{result.artifact_delete_failed} 条报告目录清理失败")
     return "，".join(parts) + "。"
+
+
+def _row_to_delete_candidate(conn: sqlite3.Connection, run_id: str) -> tuple[str | None, str | None]:
+    row = conn.execute("SELECT status, report_dir FROM runs WHERE id = ?", (run_id,)).fetchone()
+    if not row:
+        return None, None
+    return row["status"], row["report_dir"]
 
 
 def delete_runs(run_ids: list[str]) -> DeleteRunsResult:
@@ -360,27 +374,54 @@ def delete_runs(run_ids: list[str]) -> DeleteRunsResult:
     deleted = 0
     skipped_active = 0
     missing = 0
+    skipped_invalid_report_dir = 0
+    artifact_delete_failed = 0
     unique_run_ids = list(dict.fromkeys(run_ids))
 
     for run_id in unique_run_ids:
-        run = get_run(run_id)
-        if not run:
-            missing += 1
-            continue
-        if run.status in ACTIVE_STATUSES:
-            skipped_active += 1
-            continue
+        report_dir: Path | None = None
+        with _lock, _connect() as conn:
+            status, raw_report_dir = _row_to_delete_candidate(conn, run_id)
+            if status is None:
+                missing += 1
+                continue
+            if status in ACTIVE_STATUSES:
+                skipped_active += 1
+                continue
+            try:
+                report_dir = _safe_report_dir_for_delete(run_id, raw_report_dir or "")
+            except ValueError:
+                skipped_invalid_report_dir += 1
+                continue
+            cursor = conn.execute(
+                "DELETE FROM runs WHERE id = ? AND status NOT IN (?, ?)",
+                (run_id, *sorted(ACTIVE_STATUSES)),
+            )
+            if cursor.rowcount != 1:
+                status, _raw_report_dir = _row_to_delete_candidate(conn, run_id)
+                if status is None:
+                    missing += 1
+                elif status in ACTIVE_STATUSES:
+                    skipped_active += 1
+                else:
+                    missing += 1
+                continue
 
-        report_dir = _safe_report_dir_for_delete(run.report_dir)
         try:
             shutil.rmtree(report_dir)
         except FileNotFoundError:
             pass
-        with _lock, _connect() as conn:
-            conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+        except OSError:
+            artifact_delete_failed += 1
         deleted += 1
 
-    return DeleteRunsResult(deleted=deleted, skipped_active=skipped_active, missing=missing)
+    return DeleteRunsResult(
+        deleted=deleted,
+        skipped_active=skipped_active,
+        missing=missing,
+        skipped_invalid_report_dir=skipped_invalid_report_dir,
+        artifact_delete_failed=artifact_delete_failed,
+    )
 
 
 def recover_stale_runs(reason: str = "应用重启后恢复中断的运行") -> int:
