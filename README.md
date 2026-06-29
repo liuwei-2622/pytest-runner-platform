@@ -94,6 +94,19 @@ Python 可执行文件: /Users/mac/Documents/envs/ares/.venv/bin/python
 - `demo_project/` 只是可选示例项目，用来演示配置方式；平台不会在无配置时自动选择它。
 - `tests_workspace/` 只用于本仓库自动化测试夹具，不是用户项目必须放置的位置。
 
+## 大型项目使用建议
+
+平台可以运行真实的大型 pytest 项目，但它是单机/本地执行平台，不是分布式 CI 调度系统。接入大型项目时建议：
+
+- 为每个项目配置自己的虚拟环境 Python，确保该环境已经安装项目测试依赖和需要的 pytest 插件。
+- `允许的测试目录` 只填写真实测试目录，例如 `tests`、`integration_tests`，避免放开到整个项目根目录。
+- 大型项目 collection 可能较慢，建议在项目配置里提高“收集超时秒数”，或通过 `PYTEST_PLATFORM_COLLECT_TIMEOUT_SECONDS` 设置默认值。
+- 全量测试耗时较长时，按需调整 `PYTEST_PLATFORM_RUN_TIMEOUT_SECONDS`。
+- 合理设置 xdist 并行数；平台会通过 `PYTEST_PLATFORM_MAX_WORKERS` 限制最大值，避免本机资源被打满。
+- 如果测试文件超过 1000 个，测试路径自动建议可能不完整；仍可以手工输入任意位于允许目录内的 pytest 路径或 nodeid。
+- 大型项目的 HTML / Allure / stdout / stderr 可能占用较多磁盘，请定期在运行记录页批量删除旧记录和报告目录。
+- 当前平台未包含登录鉴权，建议仅在本机或可信内网环境使用，不建议直接暴露到公网。
+
 ## 运行测试
 
 在首页选择项目后，填写测试路径。
