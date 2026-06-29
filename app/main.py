@@ -140,6 +140,17 @@ def _zip_directory(directory: str) -> bytes | None:
     return buffer.getvalue()
 
 
+def _safe_form_int(raw: str, default: int, minimum: int = 1, maximum: int | None = None) -> int:
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = default
+    value = max(value, minimum)
+    if maximum is not None:
+        value = min(value, maximum)
+    return value
+
+
 def _pagination(page: int, page_size: int, total: int) -> dict:
     total_pages = max(1, (total + page_size - 1) // page_size)
     current_page = min(max(page, 1), total_pages)
@@ -689,16 +700,16 @@ async def runs(
 @app.post("/runs/delete")
 async def delete_selected_runs(
     run_ids: list[str] = Form(default=[]),
-    page: int = Form(1),
-    page_size: int = Form(25),
+    page: str = Form("1"),
+    page_size: str = Form("25"),
 ):
-    safe_page = max(page, 1)
-    safe_page_size = min(max(page_size, 1), 100)
+    safe_page = _safe_form_int(page, 1)
+    safe_page_size = _safe_form_int(page_size, 25, maximum=100)
     if not run_ids:
         message = "请选择要删除的运行记录。"
     else:
         try:
-            result = delete_runs(run_ids)
+            result = await asyncio.to_thread(delete_runs, run_ids)
         except (OSError, ValueError, sqlite3.Error) as exc:
             error = f"删除运行记录失败：{exc}"
             return RedirectResponse(

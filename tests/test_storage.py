@@ -346,13 +346,10 @@ def test_delete_runs_refuses_report_dir_outside_reports_root(tmp_path, monkeypat
     (outside_dir / "keep.txt").write_text("do not delete", encoding="utf-8")
     storage.update_run(run.id, status="passed", finished_at=utc_now(), report_dir=str(outside_dir))
 
-    try:
-        storage.delete_runs([run.id])
-    except ValueError as exc:
-        assert "outside reports directory" in str(exc)
-    else:
-        raise AssertionError("delete_runs should reject report_dir outside REPORTS_DIR")
+    result = storage.delete_runs([run.id])
 
+    assert result.deleted == 0
+    assert result.skipped_invalid_report_dir == 1
     assert storage.get_run(run.id) is not None
     assert outside_dir.exists()
     assert (outside_dir / "keep.txt").exists()
@@ -366,19 +363,16 @@ def test_delete_runs_refuses_reports_root_as_report_dir(tmp_path, monkeypatch):
     sentinel.write_text("keep root", encoding="utf-8")
     storage.update_run(run.id, status="passed", finished_at=utc_now(), report_dir=str(reports_root))
 
-    try:
-        storage.delete_runs([run.id])
-    except ValueError as exc:
-        assert "outside reports directory" in str(exc)
-    else:
-        raise AssertionError("delete_runs should reject REPORTS_DIR as report_dir")
+    result = storage.delete_runs([run.id])
 
+    assert result.deleted == 0
+    assert result.skipped_invalid_report_dir == 1
     assert storage.get_run(run.id) is not None
     assert reports_root.exists()
     assert sentinel.exists()
 
 
-def test_delete_runs_keeps_row_and_report_dir_when_rmtree_fails(tmp_path, monkeypatch):
+def test_delete_runs_reports_artifact_failure_when_rmtree_fails(tmp_path, monkeypatch):
     isolate_storage(tmp_path, monkeypatch)
     run = storage.create_run("demo", "Demo", "tests", tmp_path / "tests", RunOptions())
     report_dir = Path(run.report_dir)
@@ -390,14 +384,11 @@ def test_delete_runs_keeps_row_and_report_dir_when_rmtree_fails(tmp_path, monkey
 
     monkeypatch.setattr(storage.shutil, "rmtree", fail_rmtree)
 
-    try:
-        storage.delete_runs([run.id])
-    except OSError as exc:
-        assert str(exc) == "permission denied"
-    else:
-        raise AssertionError("delete_runs should surface rmtree failures")
+    result = storage.delete_runs([run.id])
 
-    assert storage.get_run(run.id) is not None
+    assert result.deleted == 1
+    assert result.artifact_delete_failed == 1
+    assert storage.get_run(run.id) is None
     assert report_dir.exists()
     assert (report_dir / "stdout.log").exists()
 
@@ -413,4 +404,136 @@ def test_delete_runs_deduplicates_submitted_run_ids(tmp_path, monkeypatch):
     assert result.skipped_active == 0
     assert result.missing == 1
     assert storage.get_run(run.id) is None
+
+
+def test_delete_runs_keeps_report_dir_when_database_delete_fails(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    run = storage.create_run("demo", "Demo", "tests", tmp_path / "tests", RunOptions())
+    report_dir = Path(run.report_dir)
+    sentinel = report_dir / "stdout.log"
+    sentinel.write_text("keep until db delete succeeds", encoding="utf-8")
+    storage.update_run(run.id, status="passed", finished_at=utc_now())
+    real_connect = storage._connect
+
+    class DeleteFailingConnection:
+        def __init__(self):
+            self.connection = real_connect()
+
+        def __enter__(self):
+            self.connection.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return self.connection.__exit__(exc_type, exc, tb)
+
+        def execute(self, sql, parameters=()):
+            if sql.lstrip().upper().startswith("DELETE FROM RUNS"):
+                raise sqlite3.OperationalError("database is locked")
+            return self.connection.execute(sql, parameters)
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+    monkeypatch.setattr(storage, "_connect", DeleteFailingConnection)
+
+    try:
+        storage.delete_runs([run.id])
+    except sqlite3.OperationalError as exc:
+        assert str(exc) == "database is locked"
+    else:
+        raise AssertionError("delete_runs should surface database delete failures")
+
+    assert storage.get_run(run.id) is not None
+    assert report_dir.exists()
+    assert sentinel.exists()
+
+
+def test_delete_runs_rejects_cross_run_report_dir_without_deleting_either_run(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    first = storage.create_run("demo", "Demo", "first", tmp_path / "first", RunOptions())
+    second = storage.create_run("demo", "Demo", "second", tmp_path / "second", RunOptions())
+    first_dir = Path(first.report_dir)
+    second_dir = Path(second.report_dir)
+    sentinel = second_dir / "stdout.log"
+    sentinel.write_text("belongs to second run", encoding="utf-8")
+    storage.update_run(first.id, status="passed", finished_at=utc_now(), report_dir=str(second_dir))
+    storage.update_run(second.id, status="passed", finished_at=utc_now())
+
+    result = storage.delete_runs([first.id])
+
+    assert result.deleted == 0
+    assert result.skipped_invalid_report_dir == 1
+    assert storage.get_run(first.id) is not None
+    assert storage.get_run(second.id) is not None
+    assert first_dir.exists()
+    assert second_dir.exists()
+    assert sentinel.exists()
+
+
+def test_delete_runs_reports_partial_artifact_cleanup_failures(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    first = storage.create_run("demo", "Demo", "first", tmp_path / "first", RunOptions())
+    second = storage.create_run("demo", "Demo", "second", tmp_path / "second", RunOptions())
+    first_dir = Path(first.report_dir)
+    second_dir = Path(second.report_dir)
+    (first_dir / "stdout.log").write_text("delete me", encoding="utf-8")
+    (second_dir / "stdout.log").write_text("orphan until manual cleanup", encoding="utf-8")
+    storage.update_run(first.id, status="passed", finished_at=utc_now())
+    storage.update_run(second.id, status="passed", finished_at=utc_now())
+    real_rmtree = storage.shutil.rmtree
+
+    def fail_second_rmtree(path):
+        if Path(path) == second_dir:
+            raise OSError("permission denied")
+        return real_rmtree(path)
+
+    monkeypatch.setattr(storage.shutil, "rmtree", fail_second_rmtree)
+
+    result = storage.delete_runs([first.id, second.id])
+
+    assert result.deleted == 2
+    assert result.artifact_delete_failed == 1
+    assert storage.get_run(first.id) is None
+    assert storage.get_run(second.id) is None
+    assert not first_dir.exists()
+    assert second_dir.exists()
+    assert "1 条报告目录清理失败" in storage.format_delete_runs_message(result)
+
+
+def test_delete_runs_does_not_count_zero_row_delete_as_deleted(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    run = storage.create_run("demo", "Demo", "tests", tmp_path / "tests", RunOptions())
+    storage.update_run(run.id, status="passed", finished_at=utc_now())
+    real_connect = storage._connect
+
+    class ZeroRowDeleteConnection:
+        def __init__(self):
+            self.connection = real_connect()
+
+        def __enter__(self):
+            self.connection.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return self.connection.__exit__(exc_type, exc, tb)
+
+        def execute(self, sql, parameters=()):
+            if sql.lstrip().upper().startswith("DELETE FROM RUNS"):
+                self.connection.execute("DELETE FROM runs WHERE id = ?", (parameters[0],))
+
+                class ZeroRowCursor:
+                    rowcount = 0
+
+                return ZeroRowCursor()
+            return self.connection.execute(sql, parameters)
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+    monkeypatch.setattr(storage, "_connect", ZeroRowDeleteConnection)
+
+    result = storage.delete_runs([run.id])
+
+    assert result.deleted == 0
+    assert result.missing == 1
 

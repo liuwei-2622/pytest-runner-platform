@@ -243,6 +243,84 @@ def test_runs_delete_database_error_redirects_with_error_message(tmp_path, monke
     assert "删除运行记录失败：database is locked" in redirected.text
 
 
+def test_runs_delete_uses_thread_for_storage_deletion(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    run = make_completed_run(tmp_path)
+    calls = []
+
+    async def fake_to_thread(func, *args):
+        calls.append((func, args))
+        return storage.DeleteRunsResult(deleted=1)
+
+    monkeypatch.setattr(main.asyncio, "to_thread", fake_to_thread)
+
+    response = TestClient(main.app).post(
+        "/runs/delete",
+        data={"run_ids": [run.id], "page": "1", "page_size": "25"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert calls == [(main.delete_runs, ([run.id],))]
+
+
+def test_runs_delete_malformed_pagination_redirects_with_defaults(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+
+    response = TestClient(main.app).post(
+        "/runs/delete",
+        data={"page": "abc", "page_size": "huge"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/runs?page=1&page_size=25&message=")
+
+
+def test_runs_delete_clamps_out_of_range_pagination(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    run = make_completed_run(tmp_path)
+
+    response = TestClient(main.app).post(
+        "/runs/delete",
+        data={"run_ids": [run.id], "page": "-4", "page_size": "999"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/runs?page=1&page_size=100&message=")
+
+
+def test_runs_delete_message_includes_all_partial_result_counts(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+
+    def fake_delete_runs(run_ids):
+        return storage.DeleteRunsResult(
+            deleted=1,
+            skipped_active=1,
+            missing=1,
+            skipped_invalid_report_dir=1,
+            artifact_delete_failed=1,
+        )
+
+    monkeypatch.setattr(main, "delete_runs", fake_delete_runs)
+    client = TestClient(main.app)
+
+    response = client.post(
+        "/runs/delete",
+        data={"run_ids": ["a", "b", "c", "d"], "page": "1", "page_size": "25"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    redirected = client.get(response.headers["location"])
+    assert "已删除 1 条运行记录" in redirected.text
+    assert "跳过 1 条运行中记录" in redirected.text
+    assert "忽略 1 条不存在记录" in redirected.text
+    assert "跳过 1 条报告目录异常记录" in redirected.text
+    assert "1 条报告目录清理失败" in redirected.text
+
+
 def test_runs_page_renders_bulk_delete_controls(tmp_path, monkeypatch):
     isolate_storage(tmp_path, monkeypatch)
     run = make_completed_run(tmp_path)
