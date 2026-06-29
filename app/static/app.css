@@ -504,7 +504,7 @@ td code {
 }
 
 .projects-table {
-  min-width: 980px;
+  table-layout: fixed;
 }
 
 .projects-table th,
@@ -513,22 +513,47 @@ td code {
 }
 
 .projects-table th:nth-child(1),
-.projects-table td:nth-child(1),
+.projects-table td:nth-child(1) {
+  width: 86px;
+}
+
+.projects-table th:nth-child(2),
+.projects-table td:nth-child(2) {
+  width: 136px;
+}
+
+.projects-table th:nth-child(3),
+.projects-table td:nth-child(3) {
+  width: 34%;
+}
+
+.projects-table th:nth-child(4),
+.projects-table td:nth-child(4) {
+  width: 34%;
+}
+
 .projects-table th:nth-child(5),
 .projects-table td:nth-child(5) {
+  text-align: center;
   white-space: nowrap;
-  width: 1%;
+  width: 82px;
+}
+
+.projects-table th:nth-child(6),
+.projects-table td:nth-child(6) {
+  width: 150px;
 }
 
 .projects-table td:nth-child(3),
 .projects-table td:nth-child(4) {
-  max-width: 360px;
   overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .row-actions {
   flex-wrap: nowrap;
-  min-width: 132px;
+  justify-content: flex-start;
+  min-width: 140px;
   white-space: nowrap;
 }
 
