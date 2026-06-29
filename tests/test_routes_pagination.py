@@ -215,3 +215,18 @@ def test_runs_delete_filesystem_error_redirects_with_error_message(tmp_path, mon
     redirected = client.get(location)
     assert redirected.status_code == 200
     assert "删除运行记录失败：permission denied" in redirected.text
+
+
+def test_runs_page_renders_bulk_delete_controls(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    run = make_completed_run(tmp_path)
+
+    response = TestClient(main.app).get("/runs?page=1&page_size=25")
+
+    assert response.status_code == 200
+    assert 'form id="bulk-delete-form" method="post" action="/runs/delete"' in response.text
+    assert 'input type="checkbox" id="select-all-runs"' in response.text
+    assert f'input type="checkbox" name="run_ids" value="{run.id}"' in response.text
+    assert 'button type="submit" class="link-button danger-button"' in response.text
+    assert "删除选中记录" in response.text
+    assert "确认删除选中的运行记录及其报告/日志文件吗？" in response.text
