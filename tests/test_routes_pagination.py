@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 from pathlib import Path
 
@@ -334,3 +335,64 @@ def test_runs_page_renders_bulk_delete_controls(tmp_path, monkeypatch):
     assert 'button type="submit" class="link-button danger-button"' in response.text
     assert "删除选中记录" in response.text
     assert "确认删除选中的运行记录及其报告/日志文件吗？" in response.text
+
+
+def test_runs_page_uses_sql_history_summary_without_full_run_scan(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    run = make_completed_run(tmp_path)
+    original_list_runs = storage.list_runs
+    calls = []
+
+    def paginated_only_list_runs(limit=None, offset=0):
+        calls.append((limit, offset))
+        assert limit is not None
+        return original_list_runs(limit=limit, offset=offset)
+
+    monkeypatch.setattr(main, "list_runs", paginated_only_list_runs)
+
+    response = TestClient(main.app).get("/runs?page=1&page_size=25")
+
+    assert response.status_code == 200
+    assert f"value=\"{run.id}\"" in response.text
+    assert calls == [(25, 0)]
+
+
+def test_runs_api_uses_sql_history_summary_without_full_run_scan(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    run = make_completed_run(tmp_path)
+    original_list_runs = storage.list_runs
+    calls = []
+
+    def paginated_only_list_runs(limit=None, offset=0):
+        calls.append((limit, offset))
+        assert limit is not None
+        return original_list_runs(limit=limit, offset=offset)
+
+    monkeypatch.setattr(main, "list_runs", paginated_only_list_runs)
+
+    response = TestClient(main.app).get("/api/runs?page=1&page_size=25")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [item["id"] for item in data["runs"]] == [run.id]
+    assert data["history"]["total_runs"] == 1
+    assert calls == [(25, 0)]
+
+
+def test_startup_runs_retention_cleanup_after_recovery(monkeypatch):
+    calls = []
+
+    def fake_recover_stale_runs():
+        calls.append("recover")
+        return 0
+
+    def fake_cleanup_runs_by_retention():
+        calls.append("cleanup")
+        return storage.DeleteRunsResult()
+
+    monkeypatch.setattr(main, "recover_stale_runs", fake_recover_stale_runs)
+    monkeypatch.setattr(main, "cleanup_runs_by_retention", fake_cleanup_runs_by_retention)
+
+    asyncio.run(main.recover_stale_runs_on_startup())
+
+    assert calls == ["recover", "cleanup"]

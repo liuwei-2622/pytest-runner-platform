@@ -17,7 +17,6 @@ from fastapi.templating import Jinja2Templates
 
 from .config import ALLOWED_TB_VALUES, BASE_DIR, COLLECT_TIMEOUT_SECONDS
 from .test_target_index import TestTargetIndexCache
-from .history import build_history_summary
 from .models import RunTemplate, utc_now
 from .projects import (
     ProjectConfig,
@@ -33,10 +32,12 @@ from .runner import build_preview_command, collect_tests, execute_run, quote_com
 from .security import env_var_keys_from_text, validate_env_vars, validate_env_vars_detailed, validate_options, validate_test_path
 from .storage import (
     artifact_path,
+    cleanup_runs_by_retention,
     count_runs,
     create_run,
     delete_runs,
     format_delete_runs_message,
+    get_history_summary,
     get_run,
     list_runs,
     read_log_preview,
@@ -51,6 +52,10 @@ _RUN_TASKS: dict[str, asyncio.Task] = {}
 @app.on_event("startup")
 async def recover_stale_runs_on_startup():
     recover_stale_runs()
+    try:
+        await asyncio.to_thread(cleanup_runs_by_retention)
+    except (OSError, ValueError, sqlite3.Error):
+        pass
 
 
 @app.on_event("shutdown")
@@ -683,13 +688,12 @@ async def runs(
     total = count_runs()
     pagination = _pagination(page, page_size, total)
     page_runs = list_runs(limit=pagination["page_size"], offset=pagination["offset"])
-    all_runs = list_runs()
     return templates.TemplateResponse(
         request,
         "runs.html",
         {
             "runs": page_runs,
-            "history": build_history_summary(all_runs),
+            "history": get_history_summary(),
             "pagination": pagination,
             "message": message,
             "error": error,
@@ -728,10 +732,9 @@ async def runs_api(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, 
     total = count_runs()
     pagination = _pagination(page, page_size, total)
     page_runs = list_runs(limit=pagination["page_size"], offset=pagination["offset"])
-    all_runs = list_runs()
     return {
         "runs": [run.to_dict() for run in page_runs],
-        "history": asdict(build_history_summary(all_runs)),
+        "history": asdict(get_history_summary()),
         "pagination": pagination,
     }
 
