@@ -5,10 +5,18 @@ import shutil
 import sqlite3
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 
-from .config import MAX_LOG_PREVIEW_BYTES, REPORTS_DIR, RUN_METADATA_DB
+from .config import (
+    MAX_LOG_PREVIEW_BYTES,
+    REPORTS_DIR,
+    RUN_METADATA_DB,
+    RUN_RETENTION_MAX_AGE_DAYS,
+    RUN_RETENTION_MAX_COUNT,
+)
+from .history import COMPLETED_STATUSES, FAILURE_STATUSES, HistorySummary, TrendPoint
 from .models import RunOptions, RunProgress, TestRun, utc_now
 
 _lock = Lock()
@@ -334,6 +342,163 @@ def count_runs() -> int:
     ensure_storage()
     with _connect() as conn:
         return int(conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0])
+
+
+def _rows_to_runs(rows: list[sqlite3.Row]) -> list[TestRun]:
+    runs: list[TestRun] = []
+    for row in rows:
+        try:
+            runs.append(_row_to_run(row))
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return runs
+
+
+def _trend_point(run: TestRun) -> TrendPoint:
+    return TrendPoint(
+        run_id=run.id,
+        created_at=run.created_at,
+        status=run.status,
+        duration_seconds=run.duration_seconds,
+        total=run.progress.collected or run.progress.completed or 0,
+        failed=run.progress.failed,
+        errors=run.progress.errors,
+        skipped=run.progress.skipped,
+    )
+
+
+def get_history_summary(limit: int = 30) -> HistorySummary:
+    ensure_storage()
+    completed_statuses = tuple(sorted(COMPLETED_STATUSES))
+    failure_statuses = tuple(sorted(FAILURE_STATUSES))
+    completed_placeholders = ", ".join("?" for _ in completed_statuses)
+    failure_placeholders = ", ".join("?" for _ in failure_statuses)
+    trend_limit = max(limit, 0)
+
+    with _connect() as conn:
+        total_runs = int(conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0])
+        completed_runs = int(
+            conn.execute(
+                f"SELECT COUNT(*) FROM runs WHERE status IN ({completed_placeholders})",
+                completed_statuses,
+            ).fetchone()[0]
+        )
+        passed_runs = int(conn.execute("SELECT COUNT(*) FROM runs WHERE status = 'passed'").fetchone()[0])
+        average_duration = conn.execute(
+            f"""
+            SELECT AVG((julianday(finished_at) - julianday(started_at)) * 86400.0)
+            FROM runs
+            WHERE status IN ({completed_placeholders})
+              AND started_at IS NOT NULL
+              AND finished_at IS NOT NULL
+              AND started_at != ''
+              AND finished_at != ''
+            """,
+            completed_statuses,
+        ).fetchone()[0]
+        status_counts = {
+            row["status"]: int(row["count"])
+            for row in conn.execute("SELECT status, COUNT(*) AS count FROM runs GROUP BY status").fetchall()
+        }
+        recent_failure_rows = conn.execute(
+            f"""
+            SELECT metadata_json FROM runs
+            WHERE status IN ({failure_placeholders})
+            ORDER BY created_at DESC, id DESC
+            LIMIT 5
+            """,
+            failure_statuses,
+        ).fetchall()
+        trend_rows = conn.execute(
+            """
+            SELECT metadata_json FROM runs
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (trend_limit,),
+        ).fetchall()
+
+    pass_rate = round(passed_runs / completed_runs * 100, 1) if completed_runs else None
+    average_duration_seconds = round(float(average_duration), 2) if average_duration is not None else None
+    recent_failures = _rows_to_runs(recent_failure_rows)
+    trend_points = [_trend_point(run) for run in reversed(_rows_to_runs(trend_rows))]
+    return HistorySummary(
+        total_runs=total_runs,
+        completed_runs=completed_runs,
+        pass_rate=pass_rate,
+        average_duration_seconds=average_duration_seconds,
+        status_counts=status_counts,
+        recent_failures=recent_failures,
+        trend_points=trend_points,
+    )
+
+
+def _safe_retention_value(value: int | None) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, parsed)
+
+
+def _retention_cutoff(max_age_days: int) -> str:
+    now = datetime.fromisoformat(utc_now())
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return (now - timedelta(days=max_age_days)).isoformat()
+
+
+def _add_unique_run_ids(target: list[str], run_ids: list[str]) -> None:
+    seen = set(target)
+    for run_id in run_ids:
+        if run_id not in seen:
+            target.append(run_id)
+            seen.add(run_id)
+
+
+def select_retention_run_ids(max_count: int | None = None, max_age_days: int | None = None) -> list[str]:
+    ensure_storage()
+    max_count = _safe_retention_value(RUN_RETENTION_MAX_COUNT if max_count is None else max_count)
+    max_age_days = _safe_retention_value(RUN_RETENTION_MAX_AGE_DAYS if max_age_days is None else max_age_days)
+    if not max_count and not max_age_days:
+        return []
+
+    active_statuses = tuple(sorted(ACTIVE_STATUSES))
+    active_placeholders = ", ".join("?" for _ in active_statuses)
+    candidates: list[str] = []
+    with _connect() as conn:
+        if max_count:
+            rows = conn.execute(
+                f"""
+                SELECT id FROM (
+                  SELECT id, status FROM runs ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?
+                ) WHERE status NOT IN ({active_placeholders})
+                """,
+                (max_count, *active_statuses),
+            ).fetchall()
+            _add_unique_run_ids(candidates, [row["id"] for row in rows])
+
+        if max_age_days:
+            cutoff = _retention_cutoff(max_age_days)
+            rows = conn.execute(
+                f"""
+                SELECT id FROM runs
+                WHERE created_at != ''
+                  AND created_at < ?
+                  AND status NOT IN ({active_placeholders})
+                ORDER BY created_at DESC, id DESC
+                """,
+                (cutoff, *active_statuses),
+            ).fetchall()
+            _add_unique_run_ids(candidates, [row["id"] for row in rows])
+    return candidates
+
+
+def cleanup_runs_by_retention(max_count: int | None = None, max_age_days: int | None = None) -> DeleteRunsResult:
+    run_ids = select_retention_run_ids(max_count=max_count, max_age_days=max_age_days)
+    if not run_ids:
+        return DeleteRunsResult()
+    return delete_runs(run_ids)
 
 
 def _safe_report_dir_for_delete(run_id: str, report_dir: str) -> Path:

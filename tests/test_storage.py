@@ -537,3 +537,146 @@ def test_delete_runs_does_not_count_zero_row_delete_as_deleted(tmp_path, monkeyp
     assert result.deleted == 0
     assert result.missing == 1
 
+
+def test_get_history_summary_uses_sqlite_aggregates(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    queued = storage.create_run("demo", "Demo", "queued", tmp_path / "queued", RunOptions())
+    passed = storage.create_run("demo", "Demo", "passed", tmp_path / "passed", RunOptions())
+    failed = storage.create_run("demo", "Demo", "failed", tmp_path / "failed", RunOptions())
+    error = storage.create_run("demo", "Demo", "error", tmp_path / "error", RunOptions())
+    storage.update_run(queued.id, created_at="2026-01-01T00:00:00+00:00")
+    storage.update_run(
+        passed.id,
+        status="passed",
+        created_at="2026-01-02T00:00:00+00:00",
+        started_at="2026-01-02T00:00:00+00:00",
+        finished_at="2026-01-02T00:00:03+00:00",
+        progress=RunProgress(collected=3, passed=3),
+    )
+    storage.update_run(
+        failed.id,
+        status="failed",
+        created_at="2026-01-03T00:00:00+00:00",
+        started_at="2026-01-03T00:00:00+00:00",
+        finished_at="2026-01-03T00:00:05+00:00",
+        progress=RunProgress(collected=4, failed=1),
+    )
+    storage.update_run(error.id, status="error", created_at="2026-01-04T00:00:00+00:00")
+
+    summary = storage.get_history_summary(limit=2)
+
+    assert summary.total_runs == 4
+    assert summary.completed_runs == 3
+    assert summary.pass_rate == 33.3
+    assert summary.average_duration_seconds == 4.0
+    assert summary.status_counts == {"error": 1, "failed": 1, "passed": 1, "queued": 1}
+    assert [run.id for run in summary.recent_failures] == [error.id, failed.id]
+    assert [point.run_id for point in summary.trend_points] == [failed.id, error.id]
+    assert summary.trend_points[0].failed == 1
+
+
+def test_get_history_summary_limits_recent_failures(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    failure_ids = []
+    for index in range(6):
+        run = storage.create_run("demo", "Demo", f"failure-{index}", tmp_path / f"failure-{index}", RunOptions())
+        storage.update_run(run.id, status="failed", created_at=f"2026-01-0{index + 1}T00:00:00+00:00")
+        failure_ids.append(run.id)
+
+    summary = storage.get_history_summary()
+
+    assert [run.id for run in summary.recent_failures] == list(reversed(failure_ids[1:]))
+
+
+def test_select_retention_run_ids_by_max_count_skips_active_runs(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    oldest = storage.create_run("demo", "Demo", "oldest", tmp_path / "oldest", RunOptions())
+    active = storage.create_run("demo", "Demo", "active", tmp_path / "active", RunOptions())
+    newest = storage.create_run("demo", "Demo", "newest", tmp_path / "newest", RunOptions())
+    storage.update_run(oldest.id, status="passed", created_at="2026-01-01T00:00:00+00:00", finished_at=utc_now())
+    storage.update_run(active.id, status="running", created_at="2026-01-02T00:00:00+00:00")
+    storage.update_run(newest.id, status="failed", created_at="2026-01-03T00:00:00+00:00", finished_at=utc_now())
+
+    assert storage.select_retention_run_ids(max_count=1, max_age_days=0) == [oldest.id]
+
+
+def test_cleanup_runs_by_retention_deletes_old_runs_by_age(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    old = storage.create_run("demo", "Demo", "old", tmp_path / "old", RunOptions())
+    recent = storage.create_run("demo", "Demo", "recent", tmp_path / "recent", RunOptions())
+    active = storage.create_run("demo", "Demo", "active", tmp_path / "active", RunOptions())
+    storage.update_run(old.id, status="passed", created_at="2026-01-01T00:00:00+00:00", finished_at=utc_now())
+    storage.update_run(recent.id, status="passed", created_at="2026-01-09T00:00:00+00:00", finished_at=utc_now())
+    storage.update_run(active.id, status="running", created_at="2026-01-01T00:00:00+00:00")
+    monkeypatch.setattr(storage, "utc_now", lambda: "2026-01-10T00:00:00+00:00")
+
+    result = storage.cleanup_runs_by_retention(max_count=0, max_age_days=7)
+
+    assert result.deleted == 1
+    assert storage.get_run(old.id) is None
+    assert storage.get_run(recent.id) is not None
+    assert storage.get_run(active.id) is not None
+    assert Path(old.report_dir).exists() is False
+    assert Path(recent.report_dir).exists()
+    assert Path(active.report_dir).exists()
+
+
+def test_cleanup_runs_by_retention_merges_count_and_age_without_duplicates(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    first = storage.create_run("demo", "Demo", "first", tmp_path / "first", RunOptions())
+    second = storage.create_run("demo", "Demo", "second", tmp_path / "second", RunOptions())
+    third = storage.create_run("demo", "Demo", "third", tmp_path / "third", RunOptions())
+    storage.update_run(first.id, status="passed", created_at="2026-01-01T00:00:00+00:00", finished_at=utc_now())
+    storage.update_run(second.id, status="failed", created_at="2026-01-02T00:00:00+00:00", finished_at=utc_now())
+    storage.update_run(third.id, status="passed", created_at="2026-01-09T00:00:00+00:00", finished_at=utc_now())
+    monkeypatch.setattr(storage, "utc_now", lambda: "2026-01-10T00:00:00+00:00")
+
+    result = storage.cleanup_runs_by_retention(max_count=2, max_age_days=7)
+
+    assert result.deleted == 2
+    assert storage.get_run(first.id) is None
+    assert storage.get_run(second.id) is None
+    assert storage.get_run(third.id) is not None
+
+
+def test_cleanup_runs_by_retention_keeps_invalid_report_dir_record(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    run = storage.create_run("demo", "Demo", "bad-dir", tmp_path / "bad-dir", RunOptions())
+    outside_dir = tmp_path / "outside-retention"
+    outside_dir.mkdir()
+    storage.update_run(
+        run.id,
+        status="passed",
+        created_at="2026-01-01T00:00:00+00:00",
+        finished_at=utc_now(),
+        report_dir=str(outside_dir),
+    )
+    monkeypatch.setattr(storage, "utc_now", lambda: "2026-01-10T00:00:00+00:00")
+
+    result = storage.cleanup_runs_by_retention(max_count=0, max_age_days=7)
+
+    assert result.deleted == 0
+    assert result.skipped_invalid_report_dir == 1
+    assert storage.get_run(run.id) is not None
+    assert outside_dir.exists()
+
+
+def test_cleanup_runs_by_retention_reports_artifact_delete_failure(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    run = storage.create_run("demo", "Demo", "old", tmp_path / "old", RunOptions())
+    report_dir = Path(run.report_dir)
+    storage.update_run(run.id, status="passed", created_at="2026-01-01T00:00:00+00:00", finished_at=utc_now())
+    monkeypatch.setattr(storage, "utc_now", lambda: "2026-01-10T00:00:00+00:00")
+
+    def fail_rmtree(path):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(storage.shutil, "rmtree", fail_rmtree)
+
+    result = storage.cleanup_runs_by_retention(max_count=0, max_age_days=7)
+
+    assert result.deleted == 1
+    assert result.artifact_delete_failed == 1
+    assert storage.get_run(run.id) is None
+    assert report_dir.exists()
+

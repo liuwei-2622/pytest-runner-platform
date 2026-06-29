@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import re
 import shlex
 import shutil
@@ -19,12 +20,19 @@ from .config import (
 )
 from .models import RunOptions, RunProgress, TestRun, utc_now
 from .projects import ProjectConfig, get_project
-from .storage import get_run, update_run, update_run_progress
+from .storage import cleanup_runs_by_retention, get_run, update_run, update_run_progress
 
 _semaphore = asyncio.Semaphore(MAX_CONCURRENT_RUNS)
 PROGRESS_PLUGIN = "pytest_runner_platform_progress.plugin"
 STREAM_DRAIN_TIMEOUT_SECONDS = 2.0
 ALLURE_REPORT_TIMEOUT_SECONDS = 120
+
+
+async def _cleanup_retained_runs() -> None:
+    try:
+        await asyncio.to_thread(cleanup_runs_by_retention)
+    except (OSError, ValueError, sqlite3.Error):
+        pass
 
 
 def quote_command_for_display(command: list[str]) -> str:
@@ -583,6 +591,7 @@ async def execute_run(run_id: str) -> None:
                     return_code=process.returncode,
                     error_message=f"运行超过 {RUN_TIMEOUT_SECONDS} 秒后超时",
                 )
+                await _cleanup_retained_runs()
                 return
 
             await _finish_run_tasks(
@@ -610,6 +619,7 @@ async def execute_run(run_id: str) -> None:
                 return_code=process.returncode,
                 error_message=report_plugin_error or allure_warning,
             )
+            await _cleanup_retained_runs()
     except asyncio.CancelledError:
         if process and process.returncode is None:
             await _terminate_process_group(process)
@@ -622,6 +632,7 @@ async def execute_run(run_id: str) -> None:
                 return_code=process.returncode if process else None,
                 error_message="运行被取消或服务关闭",
             )
+            await _cleanup_retained_runs()
         except KeyError:
             pass
         raise
@@ -637,5 +648,6 @@ async def execute_run(run_id: str) -> None:
                 return_code=process.returncode if process else None,
                 error_message=f"运行异常: {type(exc).__name__}: {exc}",
             )
+            await _cleanup_retained_runs()
         except KeyError:
             return
