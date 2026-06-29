@@ -19,6 +19,8 @@ from .config import (
 from .history import COMPLETED_STATUSES, FAILURE_STATUSES, HistorySummary, TrendPoint
 from .models import RunOptions, RunProgress, TestRun, utc_now
 
+RUN_STATUSES = {"queued", "running", "passed", "failed", "error", "timeout"}
+
 _lock = Lock()
 ACTIVE_STATUSES = {"queued", "running"}
 _initialized_storage: set[tuple[str, str]] = set()
@@ -31,6 +33,13 @@ class DeleteRunsResult:
     missing: int = 0
     skipped_invalid_report_dir: int = 0
     artifact_delete_failed: int = 0
+
+
+@dataclass(frozen=True)
+class RunFilters:
+    project_id: str = ""
+    status: str = ""
+    test_path: str = ""
 
 
 SCHEMA = """
@@ -320,28 +329,57 @@ def update_run_progress(run_id: str, progress: RunProgress) -> TestRun:
     return update_run(run_id, progress=progress)
 
 
-def list_runs(limit: int | None = None, offset: int = 0) -> list[TestRun]:
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _run_filter_clause(filters: RunFilters | None) -> tuple[str, list[str]]:
+    filters = filters or RunFilters()
+    clauses: list[str] = []
+    parameters: list[str] = []
+    project_id = filters.project_id.strip()
+    status = filters.status.strip()
+    test_path = filters.test_path.strip()
+    if project_id:
+        clauses.append("project_id = ?")
+        parameters.append(project_id)
+    if status:
+        if status in RUN_STATUSES:
+            clauses.append("status = ?")
+            parameters.append(status)
+        else:
+            clauses.append("0 = 1")
+    if test_path:
+        clauses.append("test_path LIKE ? ESCAPE '\\'")
+        parameters.append(f"%{_escape_like(test_path)}%")
+    if not clauses:
+        return "", []
+    return " WHERE " + " AND ".join(clauses), parameters
+
+
+def _where_with_condition(where_clause: str, condition: str) -> str:
+    if where_clause:
+        return f"{where_clause} AND {condition}"
+    return f" WHERE {condition}"
+
+
+def list_runs(limit: int | None = None, offset: int = 0, filters: RunFilters | None = None) -> list[TestRun]:
     ensure_storage()
-    runs: list[TestRun] = []
-    query = "SELECT metadata_json FROM runs ORDER BY created_at DESC, id DESC"
-    parameters: tuple[int, ...] = ()
+    where_clause, parameters = _run_filter_clause(filters)
+    query = f"SELECT metadata_json FROM runs{where_clause} ORDER BY created_at DESC, id DESC"
     if limit is not None:
         query += " LIMIT ? OFFSET ?"
-        parameters = (limit, max(offset, 0))
+        parameters.extend([limit, max(offset, 0)])
     with _connect() as conn:
         rows = conn.execute(query, parameters).fetchall()
-    for row in rows:
-        try:
-            runs.append(_row_to_run(row))
-        except (json.JSONDecodeError, TypeError):
-            continue
-    return runs
+    return _rows_to_runs(rows)
 
 
-def count_runs() -> int:
+def count_runs(filters: RunFilters | None = None) -> int:
     ensure_storage()
+    where_clause, parameters = _run_filter_clause(filters)
     with _connect() as conn:
-        return int(conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0])
+        return int(conn.execute(f"SELECT COUNT(*) FROM runs{where_clause}", parameters).fetchone()[0])
 
 
 def _rows_to_runs(rows: list[sqlite3.Row]) -> list[TestRun]:
@@ -367,55 +405,60 @@ def _trend_point(run: TestRun) -> TrendPoint:
     )
 
 
-def get_history_summary(limit: int = 30) -> HistorySummary:
+def get_history_summary(limit: int = 30, filters: RunFilters | None = None) -> HistorySummary:
     ensure_storage()
     completed_statuses = tuple(sorted(COMPLETED_STATUSES))
     failure_statuses = tuple(sorted(FAILURE_STATUSES))
     completed_placeholders = ", ".join("?" for _ in completed_statuses)
     failure_placeholders = ", ".join("?" for _ in failure_statuses)
     trend_limit = max(limit, 0)
+    where_clause, filter_parameters = _run_filter_clause(filters)
+    completed_where = _where_with_condition(where_clause, f"status IN ({completed_placeholders})")
+    passed_where = _where_with_condition(where_clause, "status = 'passed'")
+    failure_where = _where_with_condition(where_clause, f"status IN ({failure_placeholders})")
 
     with _connect() as conn:
-        total_runs = int(conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0])
+        total_runs = int(conn.execute(f"SELECT COUNT(*) FROM runs{where_clause}", filter_parameters).fetchone()[0])
         completed_runs = int(
             conn.execute(
-                f"SELECT COUNT(*) FROM runs WHERE status IN ({completed_placeholders})",
-                completed_statuses,
+                f"SELECT COUNT(*) FROM runs{completed_where}",
+                [*filter_parameters, *completed_statuses],
             ).fetchone()[0]
         )
-        passed_runs = int(conn.execute("SELECT COUNT(*) FROM runs WHERE status = 'passed'").fetchone()[0])
+        passed_runs = int(conn.execute(f"SELECT COUNT(*) FROM runs{passed_where}", filter_parameters).fetchone()[0])
         average_duration = conn.execute(
             f"""
             SELECT AVG((julianday(finished_at) - julianday(started_at)) * 86400.0)
-            FROM runs
-            WHERE status IN ({completed_placeholders})
+            FROM runs{completed_where}
               AND started_at IS NOT NULL
               AND finished_at IS NOT NULL
               AND started_at != ''
               AND finished_at != ''
             """,
-            completed_statuses,
+            [*filter_parameters, *completed_statuses],
         ).fetchone()[0]
         status_counts = {
             row["status"]: int(row["count"])
-            for row in conn.execute("SELECT status, COUNT(*) AS count FROM runs GROUP BY status").fetchall()
+            for row in conn.execute(
+                f"SELECT status, COUNT(*) AS count FROM runs{where_clause} GROUP BY status",
+                filter_parameters,
+            ).fetchall()
         }
         recent_failure_rows = conn.execute(
             f"""
-            SELECT metadata_json FROM runs
-            WHERE status IN ({failure_placeholders})
+            SELECT metadata_json FROM runs{failure_where}
             ORDER BY created_at DESC, id DESC
             LIMIT 5
             """,
-            failure_statuses,
+            [*filter_parameters, *failure_statuses],
         ).fetchall()
         trend_rows = conn.execute(
-            """
-            SELECT metadata_json FROM runs
+            f"""
+            SELECT metadata_json FROM runs{where_clause}
             ORDER BY created_at DESC, id DESC
             LIMIT ?
             """,
-            (trend_limit,),
+            [*filter_parameters, trend_limit],
         ).fetchall()
 
     pass_rate = round(passed_runs / completed_runs * 100, 1) if completed_runs else None

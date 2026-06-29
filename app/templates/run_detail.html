@@ -6,6 +6,9 @@
   <div class="section-title">
     <h1>运行 <code>{{ run.id }}</code></h1>
     <div class="actions">
+      <form class="inline-form" method="post" action="/runs/{{ run.id }}/rerun" title="沿用本次运行参数和环境变量创建新运行">
+        <button type="submit" class="button-secondary">重跑</button>
+      </form>
       {% if run.status in ['queued', 'running'] %}
         <button type="button" id="cancel-run-button" class="button-secondary">取消运行</button>
       {% endif %}
