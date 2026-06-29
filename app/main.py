@@ -26,7 +26,7 @@ from .projects import (
     list_projects,
     upsert_project,
 )
-from .reports import report_for_run
+from .reports import case_pytest_target, report_for_run
 from .run_templates import delete_run_template, list_run_templates, save_run_template
 from .runner import build_preview_command, collect_tests, execute_run, quote_command_for_display, stream_collect_tests
 from .security import env_var_keys_from_text, validate_env_vars, validate_env_vars_detailed, validate_options, validate_test_path
@@ -280,6 +280,29 @@ def _run_phase_text(run) -> str:
     if run.progress.percent is None:
         return "执行测试中..."
     return f"{run.progress.percent}%"
+
+
+def _run_redaction_secrets(run, project: ProjectConfig | None = None) -> list[str]:
+    secrets = list(run.options.env_vars.values())
+    if project:
+        secrets.extend(project.default_env.values())
+    return secrets
+
+
+def _copy_run_options(run, *, single_case: bool = False) -> RunOptions:
+    options = RunOptions.from_dict(asdict(run.options))
+    if single_case:
+        options.last_failed = False
+        options.failed_first = False
+    return options
+
+
+def _create_rerun(run, project: ProjectConfig, test_path: str, *, single_case: bool = False):
+    display_path, resolved_path = validate_test_path(project, test_path)
+    options = _copy_run_options(run, single_case=single_case)
+    new_run = create_run(project.id, project.name, display_path, resolved_path, options)
+    _schedule_run_task(new_run.id)
+    return new_run
 
 
 def _index_context(projects: list[ProjectConfig], selected_project_id: str | None = None, form: dict | None = None) -> dict:
@@ -786,12 +809,34 @@ async def rerun_run(run_id: str):
     if not project:
         raise HTTPException(status_code=400, detail="项目配置不存在，无法重跑")
     try:
-        display_path, resolved_path = validate_test_path(project, source.test_path)
+        new_run = _create_rerun(source, project, source.test_path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"测试路径不可用，无法重跑：{exc}") from exc
-    options = RunOptions.from_dict(asdict(source.options))
-    new_run = create_run(project.id, project.name, display_path, resolved_path, options)
-    _schedule_run_task(new_run.id)
+    return RedirectResponse(url=f"/runs/{new_run.id}", status_code=http_status.HTTP_303_SEE_OTHER)
+
+
+@app.post("/runs/{run_id}/failed-cases/{case_index}/rerun")
+async def rerun_failed_case(run_id: str, case_index: int):
+    source = get_run(run_id)
+    if not source:
+        raise HTTPException(status_code=404, detail="Run not found")
+    project = get_project(source.project_id)
+    if not project:
+        raise HTTPException(status_code=400, detail="项目配置不存在，无法重跑失败用例")
+    report = report_for_run(source)
+    if not report.exists:
+        raise HTTPException(status_code=400, detail="JUnit XML 不存在，无法重跑失败用例")
+    if report.error_message:
+        raise HTTPException(status_code=400, detail=report.error_message)
+    if case_index < 0 or case_index >= len(report.failed_cases):
+        raise HTTPException(status_code=404, detail="失败用例不存在")
+    target = case_pytest_target(report.failed_cases[case_index])
+    if not target:
+        raise HTTPException(status_code=400, detail="失败用例缺少可重跑的测试路径")
+    try:
+        new_run = _create_rerun(source, project, target, single_case=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"失败用例路径不可用，无法重跑：{exc}") from exc
     return RedirectResponse(url=f"/runs/{new_run.id}", status_code=http_status.HTTP_303_SEE_OTHER)
 
 
@@ -811,6 +856,7 @@ async def run_detail(
     report = report_for_run(run)
     failed_pagination = _pagination(failed_page, failed_page_size, len(report.failed_cases))
     skipped_pagination = _pagination(skipped_page, skipped_page_size, len(report.skipped_cases))
+    redaction_secrets = _run_redaction_secrets(run, project)
     return templates.TemplateResponse(
         request,
         "run_detail.html",
@@ -824,8 +870,8 @@ async def run_detail(
             "skipped_cases": _page_items(report.skipped_cases, skipped_pagination),
             "failed_pagination": failed_pagination,
             "skipped_pagination": skipped_pagination,
-            "stdout_preview": read_log_preview(run.stdout_path),
-            "stderr_preview": read_log_preview(run.stderr_path),
+            "stdout_preview": read_log_preview(run.stdout_path, redaction_secrets),
+            "stderr_preview": read_log_preview(run.stderr_path, redaction_secrets),
             "display_command": quote_command_for_display(run.command) if run.command else "",
             "phase_text": _run_phase_text(run),
         },
@@ -960,6 +1006,8 @@ async def run_status(run_id: str):
     run = get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
+    project = get_project(run.project_id)
+    redaction_secrets = _run_redaction_secrets(run, project)
     return {
         "id": run.id,
         "project_id": run.project_id,
@@ -972,8 +1020,8 @@ async def run_status(run_id: str):
         "duration_seconds": run.duration_seconds,
         "progress": asdict(run.progress),
         "phase_text": _run_phase_text(run),
-        "stdout_preview": read_log_preview(run.stdout_path),
-        "stderr_preview": read_log_preview(run.stderr_path),
+        "stdout_preview": read_log_preview(run.stdout_path, redaction_secrets),
+        "stderr_preview": read_log_preview(run.stderr_path, redaction_secrets),
         "error_message": run.error_message,
         "is_active": run.status in {"queued", "running"},
         "has_allure_results": _directory_has_files(run.allure_results_path),

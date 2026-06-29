@@ -120,6 +120,45 @@ def test_run_detail_page_renders_paginated_report_cases(tmp_path, monkeypatch):
     assert "test_skip_1" not in response.text
     assert "第 2 / 3 页，共 3 条" in response.text
     assert "第 2 / 2 页，共 2 条" in response.text
+    assert f'action="/runs/{run.id}/failed-cases/1/rerun"' in response.text
+    assert "重跑此用例" in response.text
+
+
+def test_run_detail_and_status_api_redact_env_secret_values(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    run = storage.create_run(
+        "demo",
+        "Demo",
+        "tests",
+        tmp_path / "tests",
+        RunOptions(env_vars={"TOKEN": "run-secret"}),
+    )
+    project = ProjectConfig(
+        id="demo",
+        name="Demo",
+        root_path=str(tmp_path),
+        python_executable="/usr/bin/python3",
+        working_directory=str(tmp_path),
+        allowed_test_roots=[str(tmp_path)],
+        default_env={"DEFAULT_TOKEN": "project-secret"},
+    )
+    Path(run.stdout_path).write_text("run-secret project-secret TOKEN=abc123", encoding="utf-8")
+    Path(run.stderr_path).write_text("Authorization: Bearer bearer-secret", encoding="utf-8")
+    storage.update_run(run.id, status="running", started_at=utc_now(), progress=RunProgress(updated_at=utc_now()))
+    monkeypatch.setattr(main, "get_project", lambda project_id: project)
+
+    detail = TestClient(main.app).get(f"/runs/{run.id}")
+    status = TestClient(main.app).get(f"/api/runs/{run.id}")
+
+    assert detail.status_code == 200
+    assert "run-secret" not in detail.text
+    assert "project-secret" not in detail.text
+    assert "TOKEN=******" in detail.text
+    data = status.json()
+    assert "run-secret" not in data["stdout_preview"]
+    assert "project-secret" not in data["stdout_preview"]
+    assert "bearer-secret" not in data["stderr_preview"]
+    assert "Authorization: Bearer ******" in data["stderr_preview"]
 
 
 def test_run_status_api_returns_phase_and_live_log_previews(tmp_path, monkeypatch):
@@ -486,6 +525,103 @@ def test_rerun_creates_new_run_from_source_options(tmp_path, monkeypatch):
     assert rerun.return_code is None
     assert rerun.progress.completed == 0
     assert rerun.report_dir != source.report_dir
+
+
+def test_failed_case_rerun_creates_new_run_for_case_target(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    project_root = tmp_path / "project"
+    tests_dir = project_root / "tests"
+    tests_dir.mkdir(parents=True)
+    test_file = tests_dir / "test_sample.py"
+    test_file.write_text("def test_fail():\n    assert False\n", encoding="utf-8")
+    project = ProjectConfig(
+        id="demo",
+        name="Demo",
+        root_path=str(project_root),
+        python_executable="/usr/bin/python3",
+        working_directory=str(project_root),
+        allowed_test_roots=[str(tests_dir)],
+    )
+    source = storage.create_run(
+        "demo",
+        "Demo",
+        "tests",
+        tests_dir,
+        RunOptions(keyword="auth", env_vars={"TOKEN": "secret"}, last_failed=True, failed_first=True),
+    )
+    Path(source.junit_report_path).write_text(
+        """
+        <testsuite tests="1" failures="1">
+          <testcase classname="tests.test_sample" name="test_fail" file="tests/test_sample.py" time="0.1">
+            <failure message="failed">details</failure>
+          </testcase>
+        </testsuite>
+        """.strip(),
+        encoding="utf-8",
+    )
+    scheduled = []
+    monkeypatch.setattr(main, "get_project", lambda project_id: project if project_id == "demo" else None)
+    monkeypatch.setattr(main, "_schedule_run_task", lambda run_id: scheduled.append(run_id))
+
+    response = TestClient(main.app).post(f"/runs/{source.id}/failed-cases/0/rerun", follow_redirects=False)
+
+    assert response.status_code == 303
+    new_run_id = response.headers["location"].removeprefix("/runs/")
+    assert scheduled == [new_run_id]
+    rerun = storage.get_run(new_run_id)
+    assert rerun.test_path == "tests/test_sample.py::test_fail"
+    assert rerun.resolved_test_path == f"{test_file.resolve()}::test_fail"
+    assert rerun.options.keyword == "auth"
+    assert rerun.options.env_vars == {"TOKEN": "secret"}
+    assert rerun.options.last_failed is False
+    assert rerun.options.failed_first is False
+    assert rerun.report_dir != source.report_dir
+
+
+def test_failed_case_rerun_rejects_missing_or_unusable_case(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    project_root = tmp_path / "project"
+    tests_dir = project_root / "tests"
+    tests_dir.mkdir(parents=True)
+    project = ProjectConfig(
+        id="demo",
+        name="Demo",
+        root_path=str(project_root),
+        python_executable="/usr/bin/python3",
+        working_directory=str(project_root),
+        allowed_test_roots=[str(tests_dir)],
+    )
+    source = storage.create_run("demo", "Demo", "tests", tests_dir, RunOptions())
+    Path(source.junit_report_path).write_text(
+        """
+        <testsuite tests="1" failures="1">
+          <testcase classname="tests.test_sample" name="test_fail" time="0.1">
+            <failure message="failed">details</failure>
+          </testcase>
+        </testsuite>
+        """.strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main, "get_project", lambda project_id: project)
+
+    missing = TestClient(main.app).post(f"/runs/{source.id}/failed-cases/2/rerun")
+    unusable = TestClient(main.app).post(f"/runs/{source.id}/failed-cases/0/rerun")
+
+    assert missing.status_code == 404
+    assert unusable.status_code == 400
+    assert "缺少可重跑" in unusable.text
+
+
+def test_failed_case_rerun_missing_project_returns_400(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    source = make_completed_run(tmp_path, project_id="missing-project")
+    write_junit_report(source.junit_report_path)
+    monkeypatch.setattr(main, "get_project", lambda project_id: None)
+
+    response = TestClient(main.app).post(f"/runs/{source.id}/failed-cases/0/rerun")
+
+    assert response.status_code == 400
+    assert "项目配置不存在" in response.text
 
 
 def test_rerun_missing_source_returns_404(tmp_path, monkeypatch):

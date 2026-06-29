@@ -311,6 +311,25 @@ def test_artifact_path_and_log_preview_remain_disk_backed(tmp_path, monkeypatch)
     assert storage.read_log_preview(run.stdout_path) == "first line\nsecond line"
 
 
+def test_log_preview_redacts_explicit_secrets_and_common_token_patterns(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    run = storage.create_run("demo", "Demo", "tests", tmp_path / "tests", RunOptions())
+    Path(run.stdout_path).write_text(
+        "TOKEN=abc123\nAuthorization: Bearer bearer-secret\npassword=hunter2\nvalue=ok\nabc123 again",
+        encoding="utf-8",
+    )
+
+    preview = storage.read_log_preview(run.stdout_path, secrets=["abc123", "ok", ""])
+
+    assert "abc123" not in preview
+    assert "bearer-secret" not in preview
+    assert "hunter2" not in preview
+    assert "TOKEN=******" in preview
+    assert "Authorization: Bearer ******" in preview
+    assert "password=******" in preview
+    assert "value=ok" in preview
+
+
 def test_delete_runs_removes_completed_run_from_sqlite_and_disk(tmp_path, monkeypatch):
     isolate_storage(tmp_path, monkeypatch)
     run = storage.create_run("demo", "Demo", "tests", tmp_path / "tests", RunOptions())

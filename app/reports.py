@@ -22,6 +22,15 @@ class TestCaseResult:
     details: str
 
 
+def case_pytest_target(case: TestCaseResult) -> str:
+    if not case.file or not case.name:
+        return ""
+    class_name = case.classname.rsplit(".", 1)[-1] if case.classname else ""
+    if class_name and class_name[:1].isupper():
+        return f"{case.file}::{class_name}::{case.name}"
+    return f"{case.file}::{case.name}"
+
+
 @dataclass(frozen=True)
 class TestReportSummary:
     exists: bool

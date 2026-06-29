@@ -234,6 +234,86 @@ def test_execute_run_marks_error_when_subprocess_start_raises(tmp_path, monkeypa
     assert "boom" in updates[-1]["error_message"]
 
 
+def test_base_pytest_env_uses_minimal_inheritance_and_preserves_precedence(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", "/bin")
+    monkeypatch.setenv("SECRET_TOKEN", "host-secret")
+    monkeypatch.setenv("SHARED", "host")
+    monkeypatch.setenv("PYTHONPATH", "/host/pythonpath")
+    project = make_project(tmp_path)
+    project.default_env = {"SHARED": "project", "PROJECT_SECRET": "project-secret", "PYTHONPATH": "/project/pythonpath"}
+
+    env = runner._base_pytest_env(project, RunOptions(env_vars={"SHARED": "run", "RUN_SECRET": "run-secret"}))
+
+    assert env["PATH"] == "/bin"
+    assert "SECRET_TOKEN" not in env
+    assert env["SHARED"] == "run"
+    assert env["PROJECT_SECRET"] == "project-secret"
+    assert env["RUN_SECRET"] == "run-secret"
+    assert env["PYTHONPATH"] == f"{runner.BASE_DIR}{runner.os.pathsep}/project/pythonpath"
+    assert "/host/pythonpath" not in env["PYTHONPATH"]
+
+
+def test_pytest_env_adds_progress_variables_to_minimal_env(tmp_path):
+    run = make_run(tmp_path)
+    env = runner._pytest_env(make_project(tmp_path), run)
+
+    assert env["PYTEST_RUNNER_PROGRESS_ENABLED"] == "1"
+    assert env["PYTEST_RUNNER_PROGRESS_PATH"].endswith("progress.json")
+
+
+def test_collect_tests_does_not_pass_unapproved_host_secret(tmp_path, monkeypatch):
+    captured_kwargs = {}
+    monkeypatch.setenv("SECRET_TOKEN", "host-secret")
+
+    async def fake_create_subprocess_exec(*command, **kwargs):
+        captured_kwargs.update(kwargs)
+        return FakeCollectProcess()
+
+    monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    asyncio.run(runner.collect_tests(make_project(tmp_path), tmp_path, RunOptions()))
+
+    assert "SECRET_TOKEN" not in captured_kwargs["env"]
+
+
+def test_execute_run_does_not_pass_unapproved_host_secret(tmp_path, monkeypatch):
+    run = make_run(tmp_path)
+    project = make_project(tmp_path)
+    captured_kwargs = {}
+    monkeypatch.setenv("SECRET_TOKEN", "host-secret")
+
+    def fake_update_run(run_id, **changes):
+        for key, value in changes.items():
+            setattr(run, key, value)
+        return run
+
+    async def fake_create_subprocess_exec(*command, **kwargs):
+        captured_kwargs.update(kwargs)
+        return FakeRunProcess(returncode=0)
+
+    async def noop_pump_stream(stream, path):
+        return None
+
+    async def noop_watch_progress(run_id, path, stop_event):
+        return None
+
+    async def noop_allure_report(run):
+        return ""
+
+    monkeypatch.setattr(runner, "get_run", lambda run_id: run)
+    monkeypatch.setattr(runner, "get_project", lambda project_id: project)
+    monkeypatch.setattr(runner, "update_run", fake_update_run)
+    monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(runner, "_pump_stream", noop_pump_stream)
+    monkeypatch.setattr(runner, "_watch_progress", noop_watch_progress)
+    monkeypatch.setattr(runner, "_generate_allure_report", noop_allure_report)
+
+    asyncio.run(runner.execute_run(run.id))
+
+    assert "SECRET_TOKEN" not in captured_kwargs["env"]
+    assert captured_kwargs["env"]["PYTEST_RUNNER_PROGRESS_ENABLED"] == "1"
+
+
 def test_build_pytest_args_uses_unique_progress_plugin_name(tmp_path):
     command = runner.build_pytest_args(
         project=make_project(tmp_path),

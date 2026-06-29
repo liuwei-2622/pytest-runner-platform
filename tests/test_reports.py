@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from app.reports import parse_junit_report
+from app.reports import TestCaseResult as ReportCaseResult, case_pytest_target, parse_junit_report
 
 
 def test_parse_junit_report_counts_outcomes(tmp_path: Path):
@@ -57,6 +57,41 @@ def test_parse_junit_report_supports_testsuites_root(tmp_path: Path):
     assert report.total == 2
     assert report.passed == 2
     assert report.time_seconds == 0.5
+
+
+def test_case_pytest_target_uses_file_and_preserves_parameterized_names():
+    case = ReportCaseResult(
+        name="test_api[param]",
+        classname="tests.test_api",
+        file="tests/test_api.py",
+        line="12",
+        time_seconds=0.1,
+        outcome="failed",
+        message="failed",
+        details="details",
+    )
+
+    assert case_pytest_target(case) == "tests/test_api.py::test_api[param]"
+
+
+def test_case_pytest_target_includes_class_name_when_present():
+    case = ReportCaseResult(
+        name="test_method",
+        classname="tests.test_api.TestApi",
+        file="tests/test_api.py",
+        line="12",
+        time_seconds=0.1,
+        outcome="failed",
+        message="failed",
+        details="details",
+    )
+
+    assert case_pytest_target(case) == "tests/test_api.py::TestApi::test_method"
+
+
+def test_case_pytest_target_returns_empty_without_file_or_name():
+    assert case_pytest_target(ReportCaseResult("test_x", "tests.test_x", "", "", 0.1, "failed", "", "")) == ""
+    assert case_pytest_target(ReportCaseResult("", "tests.test_x", "tests/test_x.py", "", 0.1, "failed", "", "")) == ""
 
 
 def test_parse_junit_report_handles_missing_and_malformed_files(tmp_path: Path):
