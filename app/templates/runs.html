@@ -7,6 +7,13 @@
     <a class="button-secondary" href="/">新建运行</a>
   </div>
 
+  {% if message %}
+    <div class="alert success">{{ message }}</div>
+  {% endif %}
+  {% if error %}
+    <div class="alert danger">{{ error }}</div>
+  {% endif %}
+
   <section class="history-summary">
     <div class="summary-grid">
       <div class="summary-card"><span class="summary-value">{{ history.total_runs }}</span><span>总运行数</span></div>

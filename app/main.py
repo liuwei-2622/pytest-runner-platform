@@ -6,6 +6,7 @@ import json
 import zipfile
 from dataclasses import asdict
 from pathlib import Path
+from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request, status as http_status
@@ -29,7 +30,18 @@ from .reports import report_for_run
 from .run_templates import delete_run_template, list_run_templates, save_run_template
 from .runner import build_preview_command, collect_tests, execute_run, quote_command_for_display, stream_collect_tests
 from .security import env_var_keys_from_text, validate_env_vars, validate_env_vars_detailed, validate_options, validate_test_path
-from .storage import artifact_path, count_runs, create_run, get_run, list_runs, read_log_preview, recover_stale_runs, update_run
+from .storage import (
+    artifact_path,
+    count_runs,
+    create_run,
+    delete_runs,
+    format_delete_runs_message,
+    get_run,
+    list_runs,
+    read_log_preview,
+    recover_stale_runs,
+    update_run,
+)
 
 app = FastAPI(title="pytest-runner-platform")
 _RUN_TASKS: dict[str, asyncio.Task] = {}
@@ -649,7 +661,13 @@ async def delete_project_route(request: Request, project_id: str):
 
 
 @app.get("/runs")
-async def runs(request: Request, page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100)):
+async def runs(
+    request: Request,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
+    message: str = "",
+    error: str = "",
+):
     total = count_runs()
     pagination = _pagination(page, page_size, total)
     page_runs = list_runs(limit=pagination["page_size"], offset=pagination["offset"])
@@ -657,7 +675,37 @@ async def runs(request: Request, page: int = Query(1, ge=1), page_size: int = Qu
     return templates.TemplateResponse(
         request,
         "runs.html",
-        {"runs": page_runs, "history": build_history_summary(all_runs), "pagination": pagination},
+        {
+            "runs": page_runs,
+            "history": build_history_summary(all_runs),
+            "pagination": pagination,
+            "message": message,
+            "error": error,
+        },
+    )
+
+
+@app.post("/runs/delete")
+async def delete_selected_runs(
+    run_ids: list[str] = Form(default=[]),
+    page: int = Form(1),
+    page_size: int = Form(25),
+):
+    safe_page = max(page, 1)
+    safe_page_size = min(max(page_size, 1), 100)
+    if not run_ids:
+        message = "请选择要删除的运行记录。"
+    else:
+        try:
+            result = delete_runs(run_ids)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"删除运行记录失败：{exc}") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        message = format_delete_runs_message(result)
+    return RedirectResponse(
+        url=f"/runs?page={safe_page}&page_size={safe_page_size}&message={quote(message)}",
+        status_code=http_status.HTTP_303_SEE_OTHER,
     )
 
 

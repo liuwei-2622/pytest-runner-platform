@@ -149,3 +149,44 @@ def test_cancel_run_api_marks_untracked_active_run_cancelled(tmp_path, monkeypat
     assert loaded.finished_at is not None
     assert loaded.return_code == -15
     assert loaded.error_message == "用户取消运行"
+
+
+def test_runs_delete_redirects_with_success_message_and_removes_disk(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    run = make_completed_run(tmp_path)
+    report_dir = Path(run.report_dir)
+    (report_dir / "stdout.log").write_text("old log", encoding="utf-8")
+
+    response = TestClient(main.app).post(
+        "/runs/delete",
+        data={"run_ids": [run.id], "page": "1", "page_size": "25"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/runs?page=1&page_size=25&message=")
+    assert storage.get_run(run.id) is None
+    assert not report_dir.exists()
+
+
+def test_runs_delete_without_selection_redirects_with_message(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+
+    response = TestClient(main.app).post(
+        "/runs/delete",
+        data={"page": "2", "page_size": "10"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/runs?page=2&page_size=10&message=")
+    assert storage.count_runs() == 0
+
+
+def test_runs_page_renders_delete_message_from_query(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+
+    response = TestClient(main.app).get("/runs?message=已删除%201%20条运行记录。")
+
+    assert response.status_code == 200
+    assert "已删除 1 条运行记录。" in response.text
