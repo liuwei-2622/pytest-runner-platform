@@ -503,6 +503,104 @@ td code {
   transform: none;
 }
 
+.project-list {
+  display: grid;
+  gap: 18px;
+  margin-top: 18px;
+}
+
+.project-card {
+  background: #fbfdff;
+  border: 1px solid var(--line-soft);
+  border-radius: 16px;
+  padding: 18px;
+}
+
+.project-card-header {
+  align-items: flex-start;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.project-card h2 {
+  font-family: var(--font-body);
+  font-size: 22px;
+  letter-spacing: -0.02em;
+  margin: 4px 0 0;
+}
+
+.project-id {
+  color: var(--muted);
+  font-weight: 850;
+}
+
+.project-meta {
+  display: grid;
+  gap: 10px 16px;
+  grid-template-columns: 96px minmax(0, 1fr);
+  margin: 18px 0 0;
+}
+
+.project-meta dt {
+  color: #48576e;
+  font-size: 12px;
+  font-weight: 850;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.project-meta dd {
+  margin: 0;
+  min-width: 0;
+}
+
+.project-meta code {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.row-actions {
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  min-width: max-content;
+  white-space: nowrap;
+}
+
+.row-actions a,
+.row-actions .link-button {
+  display: inline-flex;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.case-actions {
+  min-width: 86px;
+  text-align: center;
+  white-space: nowrap;
+  width: 86px;
+}
+
+.case-rerun-button {
+  background: transparent;
+  box-shadow: none;
+  color: #1578bc;
+  display: inline-flex;
+  font-size: 14px;
+  line-height: 1.2;
+  min-height: auto;
+  padding: 0;
+  white-space: nowrap;
+}
+
+.case-rerun-button:hover {
+  background: transparent;
+  box-shadow: none;
+  color: #0f5f98;
+  text-decoration: underline;
+  transform: none;
+}
+
 input[readonly] {
   background: #eef3f8;
   color: var(--muted);
@@ -909,6 +1007,20 @@ input[readonly] {
     display: block;
     overflow-x: auto;
     white-space: nowrap;
+  }
+
+  .project-card-header {
+    flex-direction: column;
+  }
+
+  .project-card .actions button,
+  .project-card .actions .button-secondary,
+  .project-card .actions .link-button {
+    width: auto;
+  }
+
+  .project-meta {
+    grid-template-columns: 1fr;
   }
 
   .env-line {

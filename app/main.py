@@ -297,8 +297,30 @@ def _copy_run_options(run, *, single_case: bool = False) -> RunOptions:
     return options
 
 
+def _rerun_target_candidates(project: ProjectConfig, test_path: str) -> list[str]:
+    candidates = [test_path]
+    path_part, separator, node_selector = test_path.partition("::")
+    path_segments = Path(path_part).parts
+    removable_prefixes = {project.root.name}
+    removable_prefixes.update(Path(root).expanduser().resolve().name for root in project.allowed_test_roots)
+    if path_segments and path_segments[0] in removable_prefixes:
+        trimmed = Path(*path_segments[1:]).as_posix() if len(path_segments) > 1 else "."
+        candidates.append(f"{trimmed}{separator}{node_selector}" if separator else trimmed)
+    return list(dict.fromkeys(candidates))
+
+
+def _validate_first_rerun_target(project: ProjectConfig, test_path: str) -> tuple[str, str]:
+    errors: list[str] = []
+    for candidate in _rerun_target_candidates(project, test_path):
+        try:
+            return validate_test_path(project, candidate)
+        except ValueError as exc:
+            errors.append(str(exc))
+    raise ValueError(errors[-1] if errors else "测试路径不可用")
+
+
 def _create_rerun(run, project: ProjectConfig, test_path: str, *, single_case: bool = False):
-    display_path, resolved_path = validate_test_path(project, test_path)
+    display_path, resolved_path = _validate_first_rerun_target(project, test_path)
     options = _copy_run_options(run, single_case=single_case)
     new_run = create_run(project.id, project.name, display_path, resolved_path, options)
     _schedule_run_task(new_run.id)
