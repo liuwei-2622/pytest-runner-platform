@@ -266,3 +266,70 @@ def test_artifact_path_and_log_preview_remain_disk_backed(tmp_path, monkeypatch)
     assert storage.artifact_path(run.id, "pytest.html") == html_path
     assert storage.artifact_path(run.id, "junit.xml") is None
     assert storage.read_log_preview(run.stdout_path) == "first line\nsecond line"
+
+
+def test_delete_runs_removes_completed_run_from_sqlite_and_disk(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    run = storage.create_run("demo", "Demo", "tests", tmp_path / "tests", RunOptions())
+    report_dir = Path(run.report_dir)
+    (report_dir / "stdout.log").write_text("log", encoding="utf-8")
+    (report_dir / "allure-results").mkdir()
+    (report_dir / "allure-results" / "result.json").write_text("{}", encoding="utf-8")
+    storage.update_run(run.id, status="passed", return_code=0, finished_at=utc_now())
+
+    result = storage.delete_runs([run.id])
+
+    assert result.deleted == 1
+    assert result.skipped_active == 0
+    assert result.missing == 0
+    assert storage.get_run(run.id) is None
+    assert not report_dir.exists()
+    assert storage.count_runs() == 0
+
+
+def test_delete_runs_skips_active_runs_and_leaves_disk_intact(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    run = storage.create_run("demo", "Demo", "tests", tmp_path / "tests", RunOptions())
+    report_dir = Path(run.report_dir)
+    (report_dir / "stdout.log").write_text("still running", encoding="utf-8")
+    storage.update_run(run.id, status="running", started_at=utc_now())
+
+    result = storage.delete_runs([run.id])
+
+    assert result.deleted == 0
+    assert result.skipped_active == 1
+    assert result.missing == 0
+    assert storage.get_run(run.id) is not None
+    assert report_dir.exists()
+    assert (report_dir / "stdout.log").read_text(encoding="utf-8") == "still running"
+
+
+def test_delete_runs_counts_missing_ids(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+
+    result = storage.delete_runs(["missing001"])
+
+    assert result.deleted == 0
+    assert result.skipped_active == 0
+    assert result.missing == 1
+
+
+def test_delete_runs_refuses_report_dir_outside_reports_root(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    run = storage.create_run("demo", "Demo", "tests", tmp_path / "tests", RunOptions())
+    outside_dir = tmp_path / "outside-report"
+    outside_dir.mkdir()
+    (outside_dir / "keep.txt").write_text("do not delete", encoding="utf-8")
+    storage.update_run(run.id, status="passed", finished_at=utc_now(), report_dir=str(outside_dir))
+
+    try:
+        storage.delete_runs([run.id])
+    except ValueError as exc:
+        assert "outside reports directory" in str(exc)
+    else:
+        raise AssertionError("delete_runs should reject report_dir outside REPORTS_DIR")
+
+    assert storage.get_run(run.id) is not None
+    assert outside_dir.exists()
+    assert (outside_dir / "keep.txt").exists()
+
