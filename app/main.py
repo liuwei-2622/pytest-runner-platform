@@ -161,7 +161,10 @@ def _validate_run_form(
     failed_first: bool | str = False,
     tb: str = "auto",
 ):
-    project = get_project(project_id or default_project_id())
+    selected_project_id = project_id or default_project_id()
+    if not selected_project_id:
+        raise ValueError("请先添加 pytest 项目")
+    project = get_project(selected_project_id)
     if not project:
         raise ValueError("项目不存在")
     display_path, resolved_path = validate_test_path(project, test_path)
@@ -229,31 +232,36 @@ def _run_phase_text(run) -> str:
     return f"{run.progress.percent}%"
 
 
+def _index_context(projects: list[ProjectConfig], selected_project_id: str | None = None, form: dict | None = None) -> dict:
+    selected_project = get_project(selected_project_id) if selected_project_id else None
+    if not selected_project and projects:
+        selected_project = projects[0]
+    selected_project_id = selected_project.id if selected_project else None
+    default_form = {
+        "project_id": selected_project_id or "",
+        "test_path": _project_default_test_target(selected_project) if selected_project else "",
+        "env_vars_text": _project_default_env_text(selected_project) if selected_project else "",
+    }
+    if form:
+        default_form.update(form)
+    return {
+        "projects": projects,
+        "selected_project_id": selected_project_id,
+        "project_default_targets": _project_default_targets(projects),
+        "project_default_envs": _project_default_envs(projects),
+        "project_collect_timeouts": _project_collect_timeouts(projects),
+        "worker_values": WORKER_VALUES,
+        "tb_values": TB_VALUES,
+        "collect_timeout_seconds": selected_project.collect_timeout_seconds if selected_project else COLLECT_TIMEOUT_SECONDS,
+        "form": default_form,
+    }
+
+
 @app.get("/")
 async def index(request: Request, project_id: str | None = None):
     projects = list_projects()
     selected_project_id = project_id or default_project_id()
-    selected_project = get_project(selected_project_id) or projects[0]
-    selected_project_id = selected_project.id
-    return templates.TemplateResponse(
-        request,
-        "index.html",
-        {
-            "projects": projects,
-            "selected_project_id": selected_project_id,
-            "project_default_targets": _project_default_targets(projects),
-            "project_default_envs": _project_default_envs(projects),
-            "project_collect_timeouts": _project_collect_timeouts(projects),
-            "worker_values": WORKER_VALUES,
-            "tb_values": TB_VALUES,
-            "collect_timeout_seconds": selected_project.collect_timeout_seconds,
-            "form": {
-                "project_id": selected_project_id,
-                "test_path": _project_default_test_target(selected_project),
-                "env_vars_text": _project_default_env_text(selected_project),
-            },
-        },
-    )
+    return templates.TemplateResponse(request, "index.html", _index_context(projects, selected_project_id))
 
 
 @app.post("/runs")
@@ -301,21 +309,12 @@ async def create_run_route(
             tb,
         )
     except ValueError as exc:
+        context = _index_context(projects, selected_project_id, form)
+        context["error"] = str(exc)
         return templates.TemplateResponse(
             request,
             "index.html",
-            {
-                "error": str(exc),
-                "projects": projects,
-                "selected_project_id": selected_project_id,
-                "project_default_targets": _project_default_targets(projects),
-                "project_default_envs": _project_default_envs(projects),
-                "project_collect_timeouts": _project_collect_timeouts(projects),
-                "worker_values": WORKER_VALUES,
-                "tb_values": TB_VALUES,
-                "collect_timeout_seconds": (get_project(selected_project_id) or projects[0]).collect_timeout_seconds,
-                "form": form,
-            },
+            context,
             status_code=http_status.HTTP_400_BAD_REQUEST,
         )
 

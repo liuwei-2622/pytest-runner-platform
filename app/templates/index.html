@@ -7,6 +7,7 @@
   {% if error %}
     <div class="alert">{{ error }}</div>
   {% endif %}
+  {% if projects %}
   <form id="run-form" method="post" action="/runs" class="form">
     <label>
       项目
@@ -570,4 +571,15 @@
   refreshPreview();
 })();
 </script>
+{% else %}
+  <div class="empty-state">
+    <h2>先添加一个 pytest 项目</h2>
+    <p class="muted">这个平台可以运行任意 pytest 项目。请配置项目根目录、Python 解释器、工作目录和允许测试路径后再运行测试。</p>
+    <div class="actions">
+      <a class="button" href="/projects/new">添加 pytest 项目</a>
+      <a class="button-secondary" href="/projects">查看项目配置</a>
+    </div>
+  </div>
+</section>
+{% endif %}
 {% endblock %}
