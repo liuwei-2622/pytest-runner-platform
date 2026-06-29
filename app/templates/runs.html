@@ -7,6 +7,13 @@
     <a class="button-secondary" href="/">新建运行</a>
   </div>
 
+  {% if message %}
+    <div class="alert status-ok">{{ message }}</div>
+  {% endif %}
+  {% if error %}
+    <div class="alert">{{ error }}</div>
+  {% endif %}
+
   <section class="history-summary">
     <div class="summary-grid">
       <div class="summary-card"><span class="summary-value">{{ history.total_runs }}</span><span>总运行数</span></div>
@@ -63,45 +70,53 @@
 
   {% if runs %}
     <h2>全部运行</h2>
-    <div class="pagination">
-      {% if pagination.has_prev %}
-        <a href="/runs?page={{ pagination.prev_page }}&page_size={{ pagination.page_size }}">上一页</a>
-      {% else %}
-        <span class="pagination-disabled">上一页</span>
-      {% endif %}
-      <span class="muted">第 {{ pagination.page }} / {{ pagination.total_pages }} 页，共 {{ pagination.total }} 条，每页 {{ pagination.page_size }} 条</span>
-      {% if pagination.has_next %}
-        <a href="/runs?page={{ pagination.next_page }}&page_size={{ pagination.page_size }}">下一页</a>
-      {% else %}
-        <span class="pagination-disabled">下一页</span>
-      {% endif %}
-    </div>
-    <table>
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>项目</th>
-          <th>状态</th>
-          <th>路径</th>
-          <th>创建时间</th>
-          <th>耗时</th>
-          <th>返回码</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for run in runs %}
+    <form id="bulk-delete-form" method="post" action="/runs/delete">
+      <input type="hidden" name="page" value="{{ pagination.page }}">
+      <input type="hidden" name="page_size" value="{{ pagination.page_size }}">
+      <div class="actions">
+        <button type="submit" class="link-button danger-button">删除选中记录</button>
+      </div>
+      <div class="pagination">
+        {% if pagination.has_prev %}
+          <a href="/runs?page={{ pagination.prev_page }}&page_size={{ pagination.page_size }}">上一页</a>
+        {% else %}
+          <span class="pagination-disabled">上一页</span>
+        {% endif %}
+        <span class="muted">第 {{ pagination.page }} / {{ pagination.total_pages }} 页，共 {{ pagination.total }} 条，每页 {{ pagination.page_size }} 条</span>
+        {% if pagination.has_next %}
+          <a href="/runs?page={{ pagination.next_page }}&page_size={{ pagination.page_size }}">下一页</a>
+        {% else %}
+          <span class="pagination-disabled">下一页</span>
+        {% endif %}
+      </div>
+      <table>
+        <thead>
           <tr>
-            <td><a href="/runs/{{ run.id }}"><code>{{ run.id }}</code></a></td>
-            <td>{{ run.project_name }} <span class="muted">({{ run.project_id }})</span></td>
-            <td><span class="badge badge-{{ run.status }}">{{ run.status }}</span></td>
-            <td><code>{{ run.test_path }}</code></td>
-            <td>{{ run.created_at }}</td>
-            <td>{% if run.duration_seconds is not none %}{{ run.duration_seconds }}s{% else %}-{% endif %}</td>
-            <td>{{ run.return_code if run.return_code is not none else '-' }}</td>
+            <th><input type="checkbox" id="select-all-runs" aria-label="选择当前页全部运行记录"></th>
+            <th>ID</th>
+            <th>项目</th>
+            <th>状态</th>
+            <th>路径</th>
+            <th>创建时间</th>
+            <th>耗时</th>
+            <th>返回码</th>
           </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {% for run in runs %}
+            <tr>
+              <td><input type="checkbox" name="run_ids" value="{{ run.id }}" aria-label="选择运行记录 {{ run.id }}"></td>
+              <td><a href="/runs/{{ run.id }}"><code>{{ run.id }}</code></a></td>
+              <td>{{ run.project_name }} <span class="muted">({{ run.project_id }})</span></td>
+              <td><span class="badge badge-{{ run.status }}">{{ run.status }}</span></td>
+              <td><code>{{ run.test_path }}</code></td>
+              <td>{{ run.created_at }}</td>
+              <td>{% if run.duration_seconds is not none %}{{ run.duration_seconds }}s{% else %}-{% endif %}</td>
+              <td>{{ run.return_code if run.return_code is not none else '-' }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
     <div class="pagination">
       {% if pagination.has_prev %}
         <a href="/runs?page={{ pagination.prev_page }}&page_size={{ pagination.page_size }}">上一页</a>
@@ -115,8 +130,33 @@
         <span class="pagination-disabled">下一页</span>
       {% endif %}
     </div>
+    </form>
   {% else %}
     <p class="muted">暂无运行记录。</p>
   {% endif %}
 </section>
+<script>
+(() => {
+  const form = document.getElementById("bulk-delete-form");
+  const selectAll = document.getElementById("select-all-runs");
+  if (!form || !selectAll) return;
+
+  function runCheckboxes() {
+    return Array.from(form.querySelectorAll('input[name="run_ids"]'));
+  }
+
+  selectAll.addEventListener("change", () => {
+    for (const checkbox of runCheckboxes()) {
+      checkbox.checked = selectAll.checked;
+    }
+  });
+
+  form.addEventListener("submit", (event) => {
+    const selectedCount = runCheckboxes().filter((checkbox) => checkbox.checked).length;
+    if (selectedCount === 0) return;
+    const ok = window.confirm("确认删除选中的运行记录及其报告/日志文件吗？运行中记录会被跳过。");
+    if (!ok) event.preventDefault();
+  });
+})();
+</script>
 {% endblock %}

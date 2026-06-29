@@ -54,31 +54,7 @@ http://127.0.0.1:8000
 
 ## 推荐使用样例
 
-平台默认内置一个 `demo_project` 示例项目，用来演示推荐配置方式。真实项目不需要放到 `tests_workspace` 下面，只要在“项目配置”里填写实际路径即可。
-
-### 默认 Demo Project
-
-```text
-项目 ID: demo
-项目名称: Demo Project
-项目根目录: /Users/mac/Documents/pytest/demo_project
-Python 可执行文件: 当前启动平台使用的 Python
-工作目录: /Users/mac/Documents/pytest/demo_project
-允许测试目录: /Users/mac/Documents/pytest/demo_project/tests
-默认环境变量: DEMO_PROJECT_ENV=ok
-```
-
-首页选择 `Demo Project` 后，测试路径填写：
-
-```text
-tests
-```
-
-或运行单个用例：
-
-```text
-tests/test_demo.py::test_demo_passes
-```
+平台面向任意 pytest 项目。首次启动如果还没有配置项目，首页会提示先添加 pytest 项目；真实项目不需要放到 `demo_project` 或 `tests_workspace` 下面，只要在“项目配置”里填写实际路径即可。
 
 ### 真实项目推荐配置
 
@@ -111,6 +87,11 @@ Python 可执行文件: /Users/mac/Documents/envs/ares/.venv/bin/python
 - Python 可执行文件优先填写该项目虚拟环境里的 Python。
 - 允许测试目录只放测试目录，不建议直接放开到整个项目根目录。
 - 默认环境变量只放团队稳定共用的值；token、账号、临时参数建议每次运行时填写。
+
+### 示例与测试资产
+
+- `demo_project/` 只是可选示例项目，用来演示配置方式；平台不会在无配置时自动选择它。
+- `tests_workspace/` 只用于本仓库自动化测试夹具，不是用户项目必须放置的位置。
 
 ## 运行测试
 
@@ -192,7 +173,7 @@ TOKEN=
 
 ## 运行历史与趋势
 
-运行记录页会基于本地 `reports/<run_id>/metadata.json` 和进度信息展示总运行数、通过率、平均耗时、最近运行趋势和最近失败记录。当前实现为本地文件解析，不依赖数据库。
+运行记录页会基于本地 SQLite 运行元数据和进度信息展示总运行数、通过率、平均耗时、最近运行趋势和最近失败记录。
 
 ## Allure 支持
 

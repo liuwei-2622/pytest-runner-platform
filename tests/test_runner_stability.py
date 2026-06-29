@@ -413,6 +413,45 @@ def test_stream_collect_tests_emits_timeout_event(tmp_path, monkeypatch):
     assert events[-1]["ok"] is False
 
 
+def test_stream_collect_tests_does_not_wait_forever_for_inherited_log_pipes(tmp_path, monkeypatch):
+    cancelled_readers = []
+
+    class FakeExitedCollectProcess:
+        pid = 12345
+
+        def __init__(self):
+            self.returncode = None
+            self.stdout = asyncio.StreamReader()
+            self.stderr = asyncio.StreamReader()
+
+        async def wait(self):
+            await asyncio.sleep(0)
+            self.returncode = 0
+            return self.returncode
+
+    async def tracking_read_collect_output(kind, stream, queue, chunks):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled_readers.append(kind)
+            raise
+
+    async def collect_events():
+        async def fake_create_subprocess_exec(*command, **kwargs):
+            return FakeExitedCollectProcess()
+
+        monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+        monkeypatch.setattr(runner, "STREAM_DRAIN_TIMEOUT_SECONDS", 0.001)
+        monkeypatch.setattr(runner, "_read_collect_output", tracking_read_collect_output)
+        return [event async for event in runner.stream_collect_tests(make_project(tmp_path), tmp_path, RunOptions())]
+
+    events = asyncio.run(collect_events())
+
+    assert [event["event"] for event in events] == ["start", "complete"]
+    assert events[-1]["ok"] is True
+    assert set(cancelled_readers) == {"stdout", "stderr"}
+
+
 def test_stream_collect_tests_terminates_process_when_cancelled(tmp_path, monkeypatch):
     terminated = []
 
@@ -518,6 +557,160 @@ def test_execute_run_marks_run_error_when_cancelled(tmp_path, monkeypatch):
     assert updates[-1]["return_code"] == -15
     assert updates[-1]["finished_at"] is not None
     assert updates[-1]["error_message"] == "运行被取消或服务关闭"
+
+
+def test_execute_run_does_not_wait_forever_for_inherited_log_pipes(tmp_path, monkeypatch):
+    run = make_run(tmp_path)
+    project = make_project(tmp_path)
+    updates = []
+    cancelled_pumps = []
+
+    def fake_update_run(run_id, **changes):
+        updates.append(changes)
+        for key, value in changes.items():
+            setattr(run, key, value)
+        return run
+
+    async def fake_create_subprocess_exec(*command, **kwargs):
+        return FakeRunProcess(returncode=0)
+
+    async def hanging_pump_stream(stream, path):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled_pumps.append(path)
+            raise
+
+    async def wait_for_stop(run_id, path, stop_event):
+        await stop_event.wait()
+
+    async def noop_allure_report(run):
+        return ""
+
+    monkeypatch.setattr(runner, "get_run", lambda run_id: run)
+    monkeypatch.setattr(runner, "get_project", lambda project_id: project)
+    monkeypatch.setattr(runner, "update_run", fake_update_run)
+    monkeypatch.setattr(runner, "STREAM_DRAIN_TIMEOUT_SECONDS", 0.001)
+    monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(runner, "_pump_stream", hanging_pump_stream)
+    monkeypatch.setattr(runner, "_watch_progress", wait_for_stop)
+    monkeypatch.setattr(runner, "_generate_allure_report", noop_allure_report)
+
+    asyncio.run(runner.execute_run(run.id))
+
+    assert updates[-1]["status"] == "passed"
+    assert set(cancelled_pumps) == {run.stdout_path, run.stderr_path}
+
+
+def test_collect_tests_terminates_process_when_cancelled(tmp_path, monkeypatch):
+    terminated = []
+
+    class FakeCancelledCollectProcess:
+        pid = 12345
+        returncode = None
+
+        async def communicate(self):
+            await asyncio.Event().wait()
+
+    async def run_cancelled_collect():
+        process = FakeCancelledCollectProcess()
+
+        async def fake_create_subprocess_exec(*command, **kwargs):
+            return process
+
+        async def fake_terminate(target):
+            terminated.append(target)
+            target.returncode = -15
+
+        monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+        monkeypatch.setattr(runner, "_terminate_process_group", fake_terminate)
+        task = asyncio.create_task(runner.collect_tests(make_project(tmp_path), tmp_path, RunOptions()))
+        await asyncio.sleep(0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(run_cancelled_collect())
+
+    assert len(terminated) == 1
+
+
+def test_generate_allure_report_uses_process_group_and_times_out(tmp_path, monkeypatch):
+    run = make_run(tmp_path)
+    Path(run.allure_results_path).mkdir(parents=True)
+    Path(run.allure_results_path, "result.json").write_text("{}", encoding="utf-8")
+    captured_kwargs = {}
+    terminated = []
+
+    class FakeAllureProcess:
+        pid = 12345
+        returncode = None
+
+        async def communicate(self):
+            await asyncio.sleep(1)
+            return b"", b""
+
+    async def fake_create_subprocess_exec(*command, **kwargs):
+        captured_kwargs.update(kwargs)
+        return FakeAllureProcess()
+
+    async def fake_terminate(target):
+        terminated.append(target)
+        target.returncode = -9
+
+    monkeypatch.setattr(runner.shutil, "which", lambda name: "/usr/local/bin/allure")
+    monkeypatch.setattr(runner, "ALLURE_REPORT_TIMEOUT_SECONDS", 0.001)
+    monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(runner, "_terminate_process_group", fake_terminate)
+
+    warning = asyncio.run(runner._generate_allure_report(run))
+
+    if runner.os.name == "posix":
+        assert captured_kwargs["start_new_session"] is True
+    assert len(terminated) == 1
+    assert warning == "Allure HTML 报告生成超时"
+    assert "Allure generate timed out after 0.001 seconds" in Path(run.stderr_path).read_text(encoding="utf-8")
+
+
+def test_generate_allure_report_terminates_process_when_cancelled(tmp_path, monkeypatch):
+    run = make_run(tmp_path)
+    Path(run.allure_results_path).mkdir(parents=True)
+    Path(run.allure_results_path, "result.json").write_text("{}", encoding="utf-8")
+    terminated = []
+
+    class FakeAllureProcess:
+        pid = 12345
+        returncode = None
+
+        async def communicate(self):
+            await asyncio.Event().wait()
+
+    async def run_cancelled_allure():
+        process = FakeAllureProcess()
+
+        async def fake_create_subprocess_exec(*command, **kwargs):
+            return process
+
+        async def fake_terminate(target):
+            terminated.append(target)
+            target.returncode = -15
+
+        monkeypatch.setattr(runner.shutil, "which", lambda name: "/usr/local/bin/allure")
+        monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+        monkeypatch.setattr(runner, "_terminate_process_group", fake_terminate)
+        task = asyncio.create_task(runner._generate_allure_report(run))
+        await asyncio.sleep(0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(run_cancelled_allure())
+
+    assert len(terminated) == 1
 
 
 def test_quote_command_for_display_quotes_spaces_and_shell_chars():

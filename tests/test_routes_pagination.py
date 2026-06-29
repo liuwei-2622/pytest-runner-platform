@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -149,3 +150,109 @@ def test_cancel_run_api_marks_untracked_active_run_cancelled(tmp_path, monkeypat
     assert loaded.finished_at is not None
     assert loaded.return_code == -15
     assert loaded.error_message == "用户取消运行"
+
+
+def test_runs_delete_redirects_with_success_message_and_removes_disk(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    run = make_completed_run(tmp_path)
+    report_dir = Path(run.report_dir)
+    (report_dir / "stdout.log").write_text("old log", encoding="utf-8")
+
+    response = TestClient(main.app).post(
+        "/runs/delete",
+        data={"run_ids": [run.id], "page": "1", "page_size": "25"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/runs?page=1&page_size=25&message=")
+    assert storage.get_run(run.id) is None
+    assert not report_dir.exists()
+
+
+def test_runs_delete_without_selection_redirects_with_message(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+
+    response = TestClient(main.app).post(
+        "/runs/delete",
+        data={"page": "2", "page_size": "10"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/runs?page=2&page_size=10&message=")
+    assert storage.count_runs() == 0
+
+
+def test_runs_page_renders_delete_message_from_query(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+
+    response = TestClient(main.app).get("/runs?message=已删除%201%20条运行记录。")
+
+    assert response.status_code == 200
+    assert "已删除 1 条运行记录。" in response.text
+
+
+def test_runs_delete_filesystem_error_redirects_with_error_message(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+
+    def fail_delete_runs(run_ids):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(main, "delete_runs", fail_delete_runs)
+    client = TestClient(main.app)
+
+    response = client.post(
+        "/runs/delete",
+        data={"run_ids": ["run-1"], "page": "3", "page_size": "50"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    location = response.headers["location"]
+    assert location.startswith("/runs?page=3&page_size=50&error=")
+    assert "permission%20denied" in location
+
+    redirected = client.get(location)
+    assert redirected.status_code == 200
+    assert "删除运行记录失败：permission denied" in redirected.text
+
+
+def test_runs_delete_database_error_redirects_with_error_message(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+
+    def fail_delete_runs(run_ids):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(main, "delete_runs", fail_delete_runs)
+    client = TestClient(main.app)
+
+    response = client.post(
+        "/runs/delete",
+        data={"run_ids": ["run-1"], "page": "4", "page_size": "25"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    location = response.headers["location"]
+    assert location.startswith("/runs?page=4&page_size=25&error=")
+    assert "database%20is%20locked" in location
+
+    redirected = client.get(location)
+    assert redirected.status_code == 200
+    assert "删除运行记录失败：database is locked" in redirected.text
+
+
+def test_runs_page_renders_bulk_delete_controls(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    run = make_completed_run(tmp_path)
+
+    response = TestClient(main.app).get("/runs?page=1&page_size=25")
+
+    assert response.status_code == 200
+    assert 'form id="bulk-delete-form" method="post" action="/runs/delete"' in response.text
+    assert 'input type="checkbox" id="select-all-runs"' in response.text
+    assert f'input type="checkbox" name="run_ids" value="{run.id}"' in response.text
+    assert 'button type="submit" class="link-button danger-button"' in response.text
+    assert "删除选中记录" in response.text
+    assert "确认删除选中的运行记录及其报告/日志文件吗？" in response.text

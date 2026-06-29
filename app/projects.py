@@ -80,16 +80,13 @@ def default_project() -> ProjectConfig:
 
 def _read_projects_file() -> list[ProjectConfig]:
     if not PROJECTS_PATH.exists():
-        return [default_project()]
+        return []
     data = json.loads(PROJECTS_PATH.read_text(encoding="utf-8"))
     return [ProjectConfig.from_dict(item) for item in data.get("projects", [])]
 
 
 def load_projects() -> list[ProjectConfig]:
-    projects = _read_projects_file()
-    if not projects:
-        return [default_project()]
-    return sorted(projects, key=lambda project: project.name.lower())
+    return sorted(_read_projects_file(), key=lambda project: project.name.lower())
 
 
 def save_projects(projects: list[ProjectConfig]) -> None:
@@ -110,8 +107,9 @@ def get_project(project_id: str) -> ProjectConfig | None:
     return None
 
 
-def default_project_id() -> str:
-    return load_projects()[0].id
+def default_project_id() -> str | None:
+    projects = load_projects()
+    return projects[0].id if projects else None
 
 
 def validate_project(project: ProjectConfig) -> ProjectConfig:
@@ -170,8 +168,6 @@ def upsert_project(project: ProjectConfig) -> None:
 def delete_project(project_id: str) -> None:
     with _lock:
         projects = load_projects()
-        if len(projects) <= 1:
-            raise ValueError("不能删除最后一个项目")
         remaining = [project for project in projects if project.id != project_id]
         if len(remaining) == len(projects):
             raise ValueError("项目不存在")

@@ -1,8 +1,11 @@
 import asyncio
+import json
 import sys
 from pathlib import Path
 
-from app import main
+from fastapi.testclient import TestClient
+
+from app import main, projects
 from app.config import COLLECT_TIMEOUT_SECONDS
 from app.main import _project_default_env_text, _project_default_test_target
 from app.projects import ProjectConfig, validate_project
@@ -17,6 +20,61 @@ def make_project(root: Path, allowed_roots: list[Path]) -> ProjectConfig:
         working_directory=str(root),
         allowed_test_roots=[str(path) for path in allowed_roots],
     )
+
+
+def isolate_projects(tmp_path, monkeypatch):
+    monkeypatch.setattr(projects, "PROJECTS_PATH", tmp_path / "projects.json")
+
+
+def test_missing_projects_file_returns_no_projects(tmp_path, monkeypatch):
+    isolate_projects(tmp_path, monkeypatch)
+
+    assert projects.load_projects() == []
+    assert projects.default_project_id() is None
+
+
+def test_empty_projects_file_returns_no_projects(tmp_path, monkeypatch):
+    isolate_projects(tmp_path, monkeypatch)
+    projects.PROJECTS_PATH.write_text(json.dumps({"projects": []}), encoding="utf-8")
+
+    assert projects.load_projects() == []
+    assert projects.default_project_id() is None
+
+
+def test_delete_project_allows_empty_project_config(tmp_path, monkeypatch):
+    isolate_projects(tmp_path, monkeypatch)
+    root = tmp_path / "project"
+    root.mkdir()
+    project = make_project(root, [root])
+    projects.save_projects([project])
+
+    projects.delete_project(project.id)
+
+    assert projects.load_projects() == []
+    assert json.loads(projects.PROJECTS_PATH.read_text(encoding="utf-8")) == {"projects": []}
+
+
+def test_index_renders_add_project_guidance_when_no_projects(monkeypatch):
+    monkeypatch.setattr(main, "list_projects", lambda: [])
+    monkeypatch.setattr(main, "default_project_id", lambda: None)
+
+    response = TestClient(main.app).get("/")
+
+    assert response.status_code == 200
+    assert "先添加一个 pytest 项目" in response.text
+    assert "Demo Project" not in response.text
+    assert "id=\"run-form\"" not in response.text
+
+
+def test_create_run_without_projects_returns_user_facing_error(monkeypatch):
+    monkeypatch.setattr(main, "list_projects", lambda: [])
+    monkeypatch.setattr(main, "default_project_id", lambda: None)
+
+    response = TestClient(main.app).post("/runs", data={"test_path": "tests"})
+
+    assert response.status_code == 400
+    assert "请先添加 pytest 项目" in response.text
+    assert "id=\"run-form\"" not in response.text
 
 
 def test_project_default_test_target_uses_first_allowed_root_relative_to_project_root(tmp_path):

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 
@@ -12,6 +14,13 @@ from .models import RunOptions, RunProgress, TestRun, utc_now
 _lock = Lock()
 ACTIVE_STATUSES = {"queued", "running"}
 _initialized_storage: set[tuple[str, str]] = set()
+
+
+@dataclass(frozen=True)
+class DeleteRunsResult:
+    deleted: int = 0
+    skipped_active: int = 0
+    missing: int = 0
 
 
 SCHEMA = """
@@ -323,6 +332,55 @@ def count_runs() -> int:
     ensure_storage()
     with _connect() as conn:
         return int(conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0])
+
+
+def _safe_report_dir_for_delete(report_dir: str) -> Path:
+    reports_root = REPORTS_DIR.resolve()
+    target = Path(report_dir).resolve()
+    if reports_root not in target.parents:
+        raise ValueError(f"Refusing to delete report directory outside reports directory: {target}")
+    return target
+
+
+def format_delete_runs_message(result: DeleteRunsResult) -> str:
+    parts: list[str] = []
+    if result.deleted:
+        parts.append(f"已删除 {result.deleted} 条运行记录")
+    else:
+        parts.append("未删除任何记录")
+    if result.skipped_active:
+        parts.append(f"跳过 {result.skipped_active} 条运行中记录")
+    if result.missing:
+        parts.append(f"忽略 {result.missing} 条不存在记录")
+    return "，".join(parts) + "。"
+
+
+def delete_runs(run_ids: list[str]) -> DeleteRunsResult:
+    ensure_storage()
+    deleted = 0
+    skipped_active = 0
+    missing = 0
+    unique_run_ids = list(dict.fromkeys(run_ids))
+
+    for run_id in unique_run_ids:
+        run = get_run(run_id)
+        if not run:
+            missing += 1
+            continue
+        if run.status in ACTIVE_STATUSES:
+            skipped_active += 1
+            continue
+
+        report_dir = _safe_report_dir_for_delete(run.report_dir)
+        try:
+            shutil.rmtree(report_dir)
+        except FileNotFoundError:
+            pass
+        with _lock, _connect() as conn:
+            conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+        deleted += 1
+
+    return DeleteRunsResult(deleted=deleted, skipped_active=skipped_active, missing=missing)
 
 
 def recover_stale_runs(reason: str = "应用重启后恢复中断的运行") -> int:

@@ -23,6 +23,8 @@ from .storage import get_run, update_run, update_run_progress
 
 _semaphore = asyncio.Semaphore(MAX_CONCURRENT_RUNS)
 PROGRESS_PLUGIN = "pytest_runner_platform_progress.plugin"
+STREAM_DRAIN_TIMEOUT_SECONDS = 2.0
+ALLURE_REPORT_TIMEOUT_SECONDS = 120
 
 
 def quote_command_for_display(command: list[str]) -> str:
@@ -294,12 +296,17 @@ async def _finish_run_tasks(
     stdout_task: asyncio.Task | None,
     stderr_task: asyncio.Task | None,
     progress_task: asyncio.Task | None,
+    drain_timeout_seconds: float = STREAM_DRAIN_TIMEOUT_SECONDS,
 ) -> None:
     if stop_progress:
         stop_progress.set()
     tasks = [task for task in [stdout_task, stderr_task, progress_task] if task]
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+    if not tasks:
+        return
+    try:
+        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=drain_timeout_seconds)
+    except asyncio.TimeoutError:
+        await _cancel_unfinished_tasks(*tasks)
 
 
 async def collect_tests(project: ProjectConfig, resolved_path: Path, options: RunOptions) -> dict:
@@ -342,6 +349,10 @@ async def collect_tests(project: ProjectConfig, resolved_path: Path, options: Ru
         await _terminate_process_group(process)
         stdout, stderr = await process.communicate()
         stderr += f"\nCollect timed out after {timeout_seconds} seconds.\n".encode()
+    except asyncio.CancelledError:
+        if process.returncode is None:
+            await _terminate_process_group(process)
+        raise
 
     stdout_text = _trim_output(stdout)
     stderr_text = _trim_output(stderr)
@@ -425,6 +436,9 @@ async def stream_collect_tests(project: ProjectConfig, resolved_path: Path, opti
             while not queue.empty():
                 yield await queue.get()
 
+            if wait_task.done():
+                break
+
             if not done and remaining <= 0 and not wait_task.done():
                 timed_out = True
                 await _terminate_process_group(process)
@@ -438,7 +452,13 @@ async def stream_collect_tests(project: ProjectConfig, resolved_path: Path, opti
         if process.returncode is None:
             await _cancel_unfinished_tasks(stdout_task, stderr_task, wait_task)
         else:
-            await asyncio.gather(stdout_task, stderr_task, wait_task, return_exceptions=True)
+            await _finish_run_tasks(
+                None,
+                stdout_task,
+                stderr_task,
+                wait_task,
+                drain_timeout_seconds=STREAM_DRAIN_TIMEOUT_SECONDS,
+            )
 
     while not queue.empty():
         yield await queue.get()
@@ -478,8 +498,21 @@ async def _generate_allure_report(run: TestRun) -> str:
         "--clean",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        **_process_group_kwargs(),
     )
-    stdout, stderr = await process.communicate()
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=ALLURE_REPORT_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        await _terminate_process_group(process)
+        _append_bytes(
+            run.stderr_path,
+            f"\n\n[allure generate stderr]\nAllure generate timed out after {ALLURE_REPORT_TIMEOUT_SECONDS} seconds.\n".encode(),
+        )
+        return "Allure HTML 报告生成超时"
+    except asyncio.CancelledError:
+        if process.returncode is None:
+            await _terminate_process_group(process)
+        raise
 
     _append_bytes(run.stdout_path, b"\n\n[allure generate stdout]\n" + stdout)
     _append_bytes(run.stderr_path, b"\n\n[allure generate stderr]\n" + stderr)
@@ -552,9 +585,13 @@ async def execute_run(run_id: str) -> None:
                 )
                 return
 
-            await asyncio.gather(stdout_task, stderr_task)
-            stop_progress.set()
-            await progress_task
+            await _finish_run_tasks(
+                stop_progress,
+                stdout_task,
+                stderr_task,
+                progress_task,
+                drain_timeout_seconds=STREAM_DRAIN_TIMEOUT_SECONDS,
+            )
 
             if process.returncode == 0:
                 status = "passed"
