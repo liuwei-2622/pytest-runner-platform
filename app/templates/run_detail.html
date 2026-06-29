@@ -104,6 +104,7 @@
             <th>用例</th>
             <th>耗时</th>
             <th>信息</th>
+            <th>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -118,6 +119,12 @@
               <td>
                 <div>{{ case.message or '-' }}</div>
                 {% if case.details %}<pre class="log compact-log">{{ case.details }}</pre>{% endif %}
+              </td>
+              <td>
+                {% set case_index = failed_pagination.offset + loop.index0 %}
+                <form class="inline-form" method="post" action="/runs/{{ run.id }}/failed-cases/{{ case_index }}/rerun">
+                  <button type="submit" class="link-button">重跑此用例</button>
+                </form>
               </td>
             </tr>
           {% endfor %}

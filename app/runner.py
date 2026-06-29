@@ -26,6 +26,25 @@ _semaphore = asyncio.Semaphore(MAX_CONCURRENT_RUNS)
 PROGRESS_PLUGIN = "pytest_runner_platform_progress.plugin"
 STREAM_DRAIN_TIMEOUT_SECONDS = 2.0
 ALLURE_REPORT_TIMEOUT_SECONDS = 120
+MINIMAL_INHERITED_ENV_KEYS = {
+    "COMSPEC",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "PATH",
+    "PATHEXT",
+    "REQUESTS_CA_BUNDLE",
+    "SSL_CERT_FILE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "USER",
+    "USERNAME",
+    "VIRTUAL_ENV",
+    "WINDIR",
+}
 
 
 async def _cleanup_retained_runs() -> None:
@@ -238,8 +257,12 @@ def _sync_progress_snapshot(run_id: str, path: Path, last_snapshot: str) -> str:
     return snapshot
 
 
+def _minimal_inherited_env() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items() if key.upper() in MINIMAL_INHERITED_ENV_KEYS}
+
+
 def _base_pytest_env(project: ProjectConfig, options: RunOptions) -> dict[str, str]:
-    env = os.environ.copy()
+    env = _minimal_inherited_env()
     env.update(project.default_env)
     env.update(options.env_vars)
     existing_pythonpath = env.get("PYTHONPATH")

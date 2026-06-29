@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sqlite3
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,6 +26,11 @@ RUN_STATUSES = {"queued", "running", "passed", "failed", "error", "timeout"}
 _lock = Lock()
 ACTIVE_STATUSES = {"queued", "running"}
 _initialized_storage: set[tuple[str, str]] = set()
+SENSITIVE_VALUE_MIN_LENGTH = 4
+SENSITIVE_PATTERNS = [
+    re.compile(r"(?i)(authorization\s*:\s*bearer\s+)([^\s]+)"),
+    re.compile(r"(?i)((?:token|password|secret|api[_-]?key)\s*[=:]\s*)([^\s&;]+)"),
+]
 
 
 @dataclass(frozen=True)
@@ -661,9 +668,20 @@ def artifact_path(run_id: str, artifact: str) -> Path | None:
     return path
 
 
-def read_log_preview(path: str) -> str:
+def redact_sensitive_text(text: str, secrets: Iterable[str] = ()) -> str:
+    redacted = text
+    for secret in dict.fromkeys(secrets):
+        if not secret or len(secret) < SENSITIVE_VALUE_MIN_LENGTH:
+            continue
+        redacted = redacted.replace(secret, "******")
+    for pattern in SENSITIVE_PATTERNS:
+        redacted = pattern.sub(lambda match: f"{match.group(1)}******", redacted)
+    return redacted
+
+
+def read_log_preview(path: str, secrets: Iterable[str] = ()) -> str:
     log_path = Path(path)
     if not log_path.exists():
         return ""
     data = log_path.read_bytes()[-MAX_LOG_PREVIEW_BYTES:]
-    return data.decode("utf-8", errors="replace")
+    return redact_sensitive_text(data.decode("utf-8", errors="replace"), secrets)
