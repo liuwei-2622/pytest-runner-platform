@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -215,6 +216,31 @@ def test_runs_delete_filesystem_error_redirects_with_error_message(tmp_path, mon
     redirected = client.get(location)
     assert redirected.status_code == 200
     assert "删除运行记录失败：permission denied" in redirected.text
+
+
+def test_runs_delete_database_error_redirects_with_error_message(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+
+    def fail_delete_runs(run_ids):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(main, "delete_runs", fail_delete_runs)
+    client = TestClient(main.app)
+
+    response = client.post(
+        "/runs/delete",
+        data={"run_ids": ["run-1"], "page": "4", "page_size": "25"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    location = response.headers["location"]
+    assert location.startswith("/runs?page=4&page_size=25&error=")
+    assert "database%20is%20locked" in location
+
+    redirected = client.get(location)
+    assert redirected.status_code == 200
+    assert "删除运行记录失败：database is locked" in redirected.text
 
 
 def test_runs_page_renders_bulk_delete_controls(tmp_path, monkeypatch):

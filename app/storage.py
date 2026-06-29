@@ -372,8 +372,10 @@ def delete_runs(run_ids: list[str]) -> DeleteRunsResult:
             continue
 
         report_dir = _safe_report_dir_for_delete(run.report_dir)
-        if report_dir.exists():
+        try:
             shutil.rmtree(report_dir)
+        except FileNotFoundError:
+            pass
         with _lock, _connect() as conn:
             conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
         deleted += 1

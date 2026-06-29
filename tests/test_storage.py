@@ -314,6 +314,30 @@ def test_delete_runs_counts_missing_ids(tmp_path, monkeypatch):
     assert result.missing == 1
 
 
+def test_delete_runs_treats_file_not_found_rmtree_as_missing_report_dir(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    run = storage.create_run("demo", "Demo", "tests", tmp_path / "tests", RunOptions())
+    report_dir = Path(run.report_dir)
+    storage.update_run(run.id, status="passed", finished_at=utc_now())
+    shutil_calls = []
+
+    def missing_rmtree(path):
+        shutil_calls.append(path)
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(storage.shutil, "rmtree", missing_rmtree)
+    report_dir.rmdir()
+
+    result = storage.delete_runs([run.id])
+
+    assert shutil_calls == [report_dir]
+    assert result.deleted == 1
+    assert result.skipped_active == 0
+    assert result.missing == 0
+    assert storage.get_run(run.id) is None
+    assert storage.count_runs() == 0
+
+
 def test_delete_runs_refuses_report_dir_outside_reports_root(tmp_path, monkeypatch):
     isolate_storage(tmp_path, monkeypatch)
     run = storage.create_run("demo", "Demo", "tests", tmp_path / "tests", RunOptions())

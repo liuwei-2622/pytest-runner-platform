@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import sqlite3
 import zipfile
 from dataclasses import asdict
 from pathlib import Path
@@ -698,7 +699,7 @@ async def delete_selected_runs(
     else:
         try:
             result = delete_runs(run_ids)
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, sqlite3.Error) as exc:
             error = f"删除运行记录失败：{exc}"
             return RedirectResponse(
                 url=f"/runs?page={safe_page}&page_size={safe_page_size}&error={quote(error)}",
