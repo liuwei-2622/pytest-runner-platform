@@ -503,6 +503,42 @@ td code {
   transform: none;
 }
 
+.projects-table {
+  min-width: 980px;
+}
+
+.projects-table th,
+.projects-table td {
+  vertical-align: middle;
+}
+
+.projects-table th:nth-child(1),
+.projects-table td:nth-child(1),
+.projects-table th:nth-child(5),
+.projects-table td:nth-child(5) {
+  white-space: nowrap;
+  width: 1%;
+}
+
+.projects-table td:nth-child(3),
+.projects-table td:nth-child(4) {
+  max-width: 360px;
+  overflow-wrap: anywhere;
+}
+
+.row-actions {
+  flex-wrap: nowrap;
+  min-width: 132px;
+  white-space: nowrap;
+}
+
+.row-actions a,
+.row-actions .link-button {
+  display: inline-flex;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
 input[readonly] {
   background: #eef3f8;
   color: var(--muted);
