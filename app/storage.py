@@ -337,7 +337,7 @@ def count_runs() -> int:
 def _safe_report_dir_for_delete(report_dir: str) -> Path:
     reports_root = REPORTS_DIR.resolve()
     target = Path(report_dir).resolve()
-    if target != reports_root and reports_root not in target.parents:
+    if reports_root not in target.parents:
         raise ValueError(f"Refusing to delete report directory outside reports directory: {target}")
     return target
 
@@ -360,8 +360,9 @@ def delete_runs(run_ids: list[str]) -> DeleteRunsResult:
     deleted = 0
     skipped_active = 0
     missing = 0
+    unique_run_ids = list(dict.fromkeys(run_ids))
 
-    for run_id in run_ids:
+    for run_id in unique_run_ids:
         run = get_run(run_id)
         if not run:
             missing += 1
@@ -371,10 +372,10 @@ def delete_runs(run_ids: list[str]) -> DeleteRunsResult:
             continue
 
         report_dir = _safe_report_dir_for_delete(run.report_dir)
-        with _lock, _connect() as conn:
-            conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
         if report_dir.exists():
             shutil.rmtree(report_dir)
+        with _lock, _connect() as conn:
+            conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
         deleted += 1
 
     return DeleteRunsResult(deleted=deleted, skipped_active=skipped_active, missing=missing)
