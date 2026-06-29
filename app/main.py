@@ -7,7 +7,7 @@ import sqlite3
 import zipfile
 from dataclasses import asdict
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from uuid import uuid4
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request, status as http_status
@@ -17,7 +17,7 @@ from fastapi.templating import Jinja2Templates
 
 from .config import ALLOWED_TB_VALUES, BASE_DIR, COLLECT_TIMEOUT_SECONDS
 from .test_target_index import TestTargetIndexCache
-from .models import RunTemplate, utc_now
+from .models import RunOptions, RunTemplate, utc_now
 from .projects import (
     ProjectConfig,
     default_project_id,
@@ -40,6 +40,7 @@ from .storage import (
     get_history_summary,
     get_run,
     list_runs,
+    RunFilters,
     read_log_preview,
     recover_stale_runs,
     update_run,
@@ -86,6 +87,7 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "app/templates"))
 test_target_index_cache = TestTargetIndexCache()
 WORKER_VALUES = ["disabled", "auto", "1", "2", "4", "8"]
 TB_VALUES = [value for value in ["auto", "long", "short", "line", "native", "no"] if value in ALLOWED_TB_VALUES]
+RUN_STATUS_VALUES = ["queued", "running", "passed", "failed", "error", "timeout"]
 
 
 def _project_form(project: ProjectConfig | None = None) -> dict:
@@ -170,6 +172,25 @@ def _pagination(page: int, page_size: int, total: int) -> dict:
         "prev_page": current_page - 1 if current_page > 1 else None,
         "next_page": current_page + 1 if current_page < total_pages else None,
     }
+
+
+def _run_filters(project_id: str = "", status: str = "", test_path: str = "") -> RunFilters:
+    return RunFilters(
+        project_id=project_id.strip(),
+        status=status.strip() if status.strip() in RUN_STATUS_VALUES else "",
+        test_path=test_path.strip(),
+    )
+
+
+def _runs_page_url(page: int, page_size: int, filters: RunFilters) -> str:
+    params = {
+        "page": page,
+        "page_size": page_size,
+        "project_id": filters.project_id,
+        "status": filters.status,
+        "test_path": filters.test_path,
+    }
+    return "/runs?" + urlencode({key: value for key, value in params.items() if value not in ("", None)})
 
 
 def _page_items(items: list, pagination: dict) -> list:
@@ -682,19 +703,29 @@ async def runs(
     request: Request,
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
+    project_id: str = "",
+    status: str = "",
+    test_path: str = "",
     message: str = "",
     error: str = "",
 ):
-    total = count_runs()
+    filters = _run_filters(project_id=project_id, status=status, test_path=test_path)
+    total = count_runs(filters=filters)
     pagination = _pagination(page, page_size, total)
-    page_runs = list_runs(limit=pagination["page_size"], offset=pagination["offset"])
+    page_runs = list_runs(limit=pagination["page_size"], offset=pagination["offset"], filters=filters)
     return templates.TemplateResponse(
         request,
         "runs.html",
         {
             "runs": page_runs,
-            "history": get_history_summary(),
+            "history": get_history_summary(filters=filters),
             "pagination": pagination,
+            "filters": filters,
+            "projects": list_projects(),
+            "status_values": RUN_STATUS_VALUES,
+            "prev_page_url": _runs_page_url(pagination["prev_page"], page_size, filters) if pagination["has_prev"] else "",
+            "next_page_url": _runs_page_url(pagination["next_page"], page_size, filters) if pagination["has_next"] else "",
+            "clear_filters_url": _runs_page_url(1, page_size, RunFilters()),
             "message": message,
             "error": error,
         },
@@ -728,15 +759,40 @@ async def delete_selected_runs(
 
 
 @app.get("/api/runs")
-async def runs_api(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100)):
-    total = count_runs()
+async def runs_api(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
+    project_id: str = "",
+    status: str = "",
+    test_path: str = "",
+):
+    filters = _run_filters(project_id=project_id, status=status, test_path=test_path)
+    total = count_runs(filters=filters)
     pagination = _pagination(page, page_size, total)
-    page_runs = list_runs(limit=pagination["page_size"], offset=pagination["offset"])
+    page_runs = list_runs(limit=pagination["page_size"], offset=pagination["offset"], filters=filters)
     return {
         "runs": [run.to_dict() for run in page_runs],
-        "history": asdict(get_history_summary()),
+        "history": asdict(get_history_summary(filters=filters)),
         "pagination": pagination,
     }
+
+
+@app.post("/runs/{run_id}/rerun")
+async def rerun_run(run_id: str):
+    source = get_run(run_id)
+    if not source:
+        raise HTTPException(status_code=404, detail="Run not found")
+    project = get_project(source.project_id)
+    if not project:
+        raise HTTPException(status_code=400, detail="项目配置不存在，无法重跑")
+    try:
+        display_path, resolved_path = validate_test_path(project, source.test_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"测试路径不可用，无法重跑：{exc}") from exc
+    options = RunOptions.from_dict(asdict(source.options))
+    new_run = create_run(project.id, project.name, display_path, resolved_path, options)
+    _schedule_run_task(new_run.id)
+    return RedirectResponse(url=f"/runs/{new_run.id}", status_code=http_status.HTTP_303_SEE_OTHER)
 
 
 @app.get("/runs/{run_id}")

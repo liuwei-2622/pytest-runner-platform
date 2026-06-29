@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from app import main, storage
 from app.models import RunOptions, RunProgress, utc_now
+from app.projects import ProjectConfig
 
 
 def isolate_storage(tmp_path, monkeypatch):
@@ -62,7 +63,7 @@ def test_runs_page_renders_pagination_controls(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     assert "第 1 / 2 页，共 3 条，每页 2 条" in response.text
-    assert "href=\"/runs?page=2&page_size=2\"" in response.text
+    assert "href=\"/runs?page=2&amp;page_size=2\"" in response.text
 
 
 def write_junit_report(path: str) -> None:
@@ -331,8 +332,8 @@ def test_runs_page_renders_bulk_delete_controls(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert 'form id="bulk-delete-form" method="post" action="/runs/delete"' in response.text
     assert 'input type="checkbox" id="select-all-runs"' in response.text
-    assert f'input type="checkbox" name="run_ids" value="{run.id}"' in response.text
-    assert 'button type="submit" class="link-button danger-button"' in response.text
+    assert f'input form="bulk-delete-form" type="checkbox" name="run_ids" value="{run.id}"' in response.text
+    assert 'button form="bulk-delete-form" type="submit" class="link-button danger-button"' in response.text
     assert "删除选中记录" in response.text
     assert "确认删除选中的运行记录及其报告/日志文件吗？" in response.text
 
@@ -343,10 +344,10 @@ def test_runs_page_uses_sql_history_summary_without_full_run_scan(tmp_path, monk
     original_list_runs = storage.list_runs
     calls = []
 
-    def paginated_only_list_runs(limit=None, offset=0):
-        calls.append((limit, offset))
+    def paginated_only_list_runs(limit=None, offset=0, filters=None):
+        calls.append((limit, offset, filters))
         assert limit is not None
-        return original_list_runs(limit=limit, offset=offset)
+        return original_list_runs(limit=limit, offset=offset, filters=filters)
 
     monkeypatch.setattr(main, "list_runs", paginated_only_list_runs)
 
@@ -354,7 +355,7 @@ def test_runs_page_uses_sql_history_summary_without_full_run_scan(tmp_path, monk
 
     assert response.status_code == 200
     assert f"value=\"{run.id}\"" in response.text
-    assert calls == [(25, 0)]
+    assert [(limit, offset) for limit, offset, _filters in calls] == [(25, 0)]
 
 
 def test_runs_api_uses_sql_history_summary_without_full_run_scan(tmp_path, monkeypatch):
@@ -363,10 +364,10 @@ def test_runs_api_uses_sql_history_summary_without_full_run_scan(tmp_path, monke
     original_list_runs = storage.list_runs
     calls = []
 
-    def paginated_only_list_runs(limit=None, offset=0):
-        calls.append((limit, offset))
+    def paginated_only_list_runs(limit=None, offset=0, filters=None):
+        calls.append((limit, offset, filters))
         assert limit is not None
-        return original_list_runs(limit=limit, offset=offset)
+        return original_list_runs(limit=limit, offset=offset, filters=filters)
 
     monkeypatch.setattr(main, "list_runs", paginated_only_list_runs)
 
@@ -376,7 +377,134 @@ def test_runs_api_uses_sql_history_summary_without_full_run_scan(tmp_path, monke
     data = response.json()
     assert [item["id"] for item in data["runs"]] == [run.id]
     assert data["history"]["total_runs"] == 1
-    assert calls == [(25, 0)]
+    assert [(limit, offset) for limit, offset, _filters in calls] == [(25, 0)]
+
+
+def test_runs_api_filters_by_project_status_and_path(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    first = make_completed_run(tmp_path, project_id="demo", test_path="tests/api/test_auth.py")
+    second = make_completed_run(tmp_path, project_id="demo", test_path="tests/ui/test_auth.py")
+    third = make_completed_run(tmp_path, project_id="other", test_path="tests/api/test_auth.py")
+    storage.update_run(first.id, status="failed", created_at="2026-01-03T00:00:00+00:00")
+    storage.update_run(second.id, status="failed", created_at="2026-01-02T00:00:00+00:00")
+    storage.update_run(third.id, status="failed", created_at="2026-01-01T00:00:00+00:00")
+
+    response = TestClient(main.app).get("/api/runs?project_id=demo&status=failed&test_path=api&page=1&page_size=25")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [item["id"] for item in data["runs"]] == [first.id]
+    assert data["pagination"]["total"] == 1
+    assert data["history"]["total_runs"] == 1
+    assert data["history"]["status_counts"] == {"failed": 1}
+
+
+def test_runs_page_renders_filters_and_preserves_them_in_pagination(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    first = make_completed_run(tmp_path, project_id="demo", test_path="tests/api/test_auth.py")
+    second = make_completed_run(tmp_path, project_id="demo", test_path="tests/api/test_checkout.py")
+    third = make_completed_run(tmp_path, project_id="demo", test_path="tests/ui/test_auth.py")
+    storage.update_run(first.id, status="failed", created_at="2026-01-03T00:00:00+00:00")
+    storage.update_run(second.id, status="failed", created_at="2026-01-02T00:00:00+00:00")
+    storage.update_run(third.id, status="passed", created_at="2026-01-01T00:00:00+00:00")
+
+    response = TestClient(main.app).get("/runs?project_id=demo&status=failed&test_path=api&page=1&page_size=1")
+
+    assert response.status_code == 200
+    assert "筛选" in response.text
+    assert 'name="project_id"' in response.text
+    assert 'option value="demo" selected' in response.text
+    assert 'option value="failed" selected' in response.text
+    assert 'name="test_path" value="api"' in response.text
+    assert f'value="{first.id}"' in response.text
+    assert f'value="{second.id}"' not in response.text
+    assert f'value="{third.id}"' not in response.text
+    assert "project_id=demo" in response.text
+    assert "status=failed" in response.text
+    assert "test_path=api" in response.text
+    assert "page=2" in response.text
+
+
+def test_run_pages_render_rerun_controls(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    run = make_completed_run(tmp_path)
+
+    detail = TestClient(main.app).get(f"/runs/{run.id}")
+    listing = TestClient(main.app).get("/runs?page=1&page_size=25")
+
+    assert detail.status_code == 200
+    assert f'action="/runs/{run.id}/rerun"' in detail.text
+    assert "重跑" in detail.text
+    assert listing.status_code == 200
+    assert f'action="/runs/{run.id}/rerun"' in listing.text
+
+
+def test_rerun_creates_new_run_from_source_options(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    project_root = tmp_path / "project"
+    tests_dir = project_root / "tests"
+    tests_dir.mkdir(parents=True)
+    test_file = tests_dir / "test_sample.py"
+    test_file.write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    project = ProjectConfig(
+        id="demo",
+        name="Demo",
+        root_path=str(project_root),
+        python_executable="/usr/bin/python3",
+        working_directory=str(project_root),
+        allowed_test_roots=[str(tests_dir)],
+    )
+    source = storage.create_run(
+        "demo",
+        "Old Demo Name",
+        "tests/test_sample.py",
+        test_file,
+        RunOptions(keyword="ok", marker="smoke", verbosity="verbose", maxfail=2, workers="2", env_vars={"TOKEN": "secret"}, last_failed=True, failed_first=True, tb="short"),
+    )
+    storage.update_run(source.id, status="failed", command=["old"], return_code=1, finished_at=utc_now())
+    scheduled = []
+    monkeypatch.setattr(main, "get_project", lambda project_id: project if project_id == "demo" else None)
+    monkeypatch.setattr(main, "_schedule_run_task", lambda run_id: scheduled.append(run_id))
+
+    response = TestClient(main.app).post(f"/runs/{source.id}/rerun", follow_redirects=False)
+
+    assert response.status_code == 303
+    new_run_id = response.headers["location"].removeprefix("/runs/")
+    assert new_run_id != source.id
+    assert scheduled == [new_run_id]
+    rerun = storage.get_run(new_run_id)
+    assert rerun.status == "queued"
+    assert rerun.project_id == "demo"
+    assert rerun.project_name == "Demo"
+    assert rerun.test_path == "tests/test_sample.py"
+    assert rerun.resolved_test_path == str(test_file.resolve())
+    assert rerun.options.keyword == "ok"
+    assert rerun.options.marker == "smoke"
+    assert rerun.options.maxfail == 2
+    assert rerun.options.env_vars == {"TOKEN": "secret"}
+    assert rerun.command == []
+    assert rerun.return_code is None
+    assert rerun.progress.completed == 0
+    assert rerun.report_dir != source.report_dir
+
+
+def test_rerun_missing_source_returns_404(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+
+    response = TestClient(main.app).post("/runs/missing/rerun")
+
+    assert response.status_code == 404
+
+
+def test_rerun_missing_project_returns_400(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    source = make_completed_run(tmp_path, project_id="missing-project")
+    monkeypatch.setattr(main, "get_project", lambda project_id: None)
+
+    response = TestClient(main.app).post(f"/runs/{source.id}/rerun")
+
+    assert response.status_code == 400
+    assert "项目配置不存在" in response.text
 
 
 def test_startup_runs_retention_cleanup_after_recovery(monkeypatch):

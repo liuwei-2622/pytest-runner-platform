@@ -128,6 +128,49 @@ def test_count_runs_and_paginated_list_runs_use_sqlite_order(tmp_path, monkeypat
     assert [run.id for run in storage.list_runs(limit=2)] == sorted([first.id, second.id], reverse=True)
 
 
+def test_list_count_and_summary_runs_support_filters(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    first = storage.create_run("demo", "Demo", "tests/api/test_auth.py", tmp_path / "auth", RunOptions())
+    second = storage.create_run("other", "Other", "tests/ui/test_auth.py", tmp_path / "ui", RunOptions())
+    third = storage.create_run("demo", "Demo", "tests/api/test_checkout.py", tmp_path / "checkout", RunOptions())
+    storage.update_run(
+        first.id,
+        status="failed",
+        created_at="2026-01-01T00:00:00+00:00",
+        started_at="2026-01-01T00:00:00+00:00",
+        finished_at="2026-01-01T00:00:04+00:00",
+        progress=RunProgress(collected=4, failed=1),
+    )
+    storage.update_run(second.id, status="passed", created_at="2026-01-02T00:00:00+00:00")
+    storage.update_run(third.id, status="passed", created_at="2026-01-03T00:00:00+00:00")
+
+    filters = storage.RunFilters(project_id="demo", status="failed", test_path="api")
+
+    assert storage.count_runs(filters=filters) == 1
+    assert [run.id for run in storage.list_runs(filters=filters)] == [first.id]
+    summary = storage.get_history_summary(filters=filters)
+    assert summary.total_runs == 1
+    assert summary.completed_runs == 1
+    assert summary.pass_rate == 0.0
+    assert summary.average_duration_seconds == 4.0
+    assert summary.status_counts == {"failed": 1}
+    assert [run.id for run in summary.recent_failures] == [first.id]
+    assert [point.run_id for point in summary.trend_points] == [first.id]
+
+
+def test_list_runs_filters_escape_like_wildcards(tmp_path, monkeypatch):
+    isolate_storage(tmp_path, monkeypatch)
+    literal_percent = storage.create_run("demo", "Demo", "tests/test_100%_case.py", tmp_path / "percent", RunOptions())
+    wildcard_match = storage.create_run("demo", "Demo", "tests/test_1000_case.py", tmp_path / "wildcard", RunOptions())
+    literal_underscore = storage.create_run("demo", "Demo", "tests/test_api_case.py", tmp_path / "underscore", RunOptions())
+    broad_match = storage.create_run("demo", "Demo", "tests/test_apicase.py", tmp_path / "broad", RunOptions())
+
+    assert [run.id for run in storage.list_runs(filters=storage.RunFilters(test_path="100%"))] == [literal_percent.id]
+    assert wildcard_match.id not in [run.id for run in storage.list_runs(filters=storage.RunFilters(test_path="100%"))]
+    assert [run.id for run in storage.list_runs(filters=storage.RunFilters(test_path="api_"))] == [literal_underscore.id]
+    assert broad_match.id not in [run.id for run in storage.list_runs(filters=storage.RunFilters(test_path="api_"))]
+
+
 def test_legacy_metadata_is_backfilled_idempotently_and_corrupt_json_is_skipped(tmp_path, monkeypatch):
     isolate_storage(tmp_path, monkeypatch)
     legacy = legacy_run(tmp_path)
