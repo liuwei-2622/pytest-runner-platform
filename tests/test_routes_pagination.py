@@ -121,7 +121,7 @@ def test_run_detail_page_renders_paginated_report_cases(tmp_path, monkeypatch):
     assert "第 2 / 3 页，共 3 条" in response.text
     assert "第 2 / 2 页，共 2 条" in response.text
     assert f'action="/runs/{run.id}/failed-cases/1/rerun"' in response.text
-    assert "重跑此用例" in response.text
+    assert "重跑" in response.text
 
 
 def test_run_detail_and_status_api_redact_env_secret_values(tmp_path, monkeypatch):
@@ -552,8 +552,8 @@ def test_failed_case_rerun_creates_new_run_for_case_target(tmp_path, monkeypatch
     Path(source.junit_report_path).write_text(
         """
         <testsuite tests="1" failures="1">
-          <testcase classname="tests.test_sample" name="test_fail" file="tests/test_sample.py" time="0.1">
-            <failure message="failed">details</failure>
+          <testcase classname="tests.test_sample" name="test_fail" time="0.1">
+            <failure message="failed">project/tests/test_sample.py:1: AssertionError</failure>
           </testcase>
         </testsuite>
         """.strip(),

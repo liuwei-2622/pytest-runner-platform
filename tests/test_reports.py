@@ -89,6 +89,21 @@ def test_case_pytest_target_includes_class_name_when_present():
     assert case_pytest_target(case) == "tests/test_api.py::TestApi::test_method"
 
 
+def test_case_pytest_target_falls_back_to_python_path_in_details():
+    case = ReportCaseResult(
+        name="test_fails",
+        classname="tests_workspace.sample.test_example",
+        file="",
+        line="",
+        time_seconds=0.1,
+        outcome="failed",
+        message="failed",
+        details="tests_workspace/sample/test_example.py:10: AssertionError",
+    )
+
+    assert case_pytest_target(case) == "tests_workspace/sample/test_example.py::test_fails"
+
+
 def test_case_pytest_target_returns_empty_without_file_or_name():
     assert case_pytest_target(ReportCaseResult("test_x", "tests.test_x", "", "", 0.1, "failed", "", "")) == ""
     assert case_pytest_target(ReportCaseResult("", "tests.test_x", "tests/test_x.py", "", 0.1, "failed", "", "")) == ""

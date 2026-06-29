@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -8,6 +9,7 @@ from xml.etree import ElementTree
 from .models import TestRun
 
 Outcome = Literal["passed", "failed", "error", "skipped"]
+PYTHON_PATH_PATTERN = re.compile(r"(?m)([A-Za-z0-9_./\\-]+\.py):\d+(?::|\b)")
 
 
 @dataclass(frozen=True)
@@ -22,13 +24,24 @@ class TestCaseResult:
     details: str
 
 
+def _case_file_path(case: TestCaseResult) -> str:
+    if case.file:
+        return case.file
+    for text in (case.details, case.message):
+        match = PYTHON_PATH_PATTERN.search(text or "")
+        if match:
+            return match.group(1)
+    return ""
+
+
 def case_pytest_target(case: TestCaseResult) -> str:
-    if not case.file or not case.name:
+    file_path = _case_file_path(case)
+    if not file_path or not case.name:
         return ""
     class_name = case.classname.rsplit(".", 1)[-1] if case.classname else ""
     if class_name and class_name[:1].isupper():
-        return f"{case.file}::{class_name}::{case.name}"
-    return f"{case.file}::{case.name}"
+        return f"{file_path}::{class_name}::{case.name}"
+    return f"{file_path}::{case.name}"
 
 
 @dataclass(frozen=True)

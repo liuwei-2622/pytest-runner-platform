@@ -9,37 +9,29 @@
   {% if error %}
     <div class="alert">{{ error }}</div>
   {% endif %}
-  <div class="table-wrap">
-    <table class="projects-table">
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>名称</th>
-          <th>根目录</th>
-          <th>Python</th>
-          <th>收集超时</th>
-          <th>操作</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for project in projects %}
-          <tr>
-            <td><code>{{ project.id }}</code></td>
-            <td>{{ project.name }}</td>
-            <td><code>{{ project.root_path }}</code></td>
-            <td><code>{{ project.python_executable }}</code></td>
-            <td>{{ project.collect_timeout_seconds }}s</td>
-            <td class="actions row-actions">
-              <a href="/?project_id={{ project.id }}">运行</a>
-              <a href="/projects/{{ project.id }}/edit">编辑</a>
-              <form method="post" action="/projects/{{ project.id }}/delete" class="inline-form">
-                <button type="submit" class="link-button">删除</button>
-              </form>
-            </td>
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+  <div class="project-list">
+    {% for project in projects %}
+      <article class="project-card">
+        <div class="project-card-header">
+          <div>
+            <div class="project-id"><code>{{ project.id }}</code></div>
+            <h2>{{ project.name }}</h2>
+          </div>
+          <div class="actions row-actions">
+            <a href="/?project_id={{ project.id }}">运行</a>
+            <a href="/projects/{{ project.id }}/edit">编辑</a>
+            <form method="post" action="/projects/{{ project.id }}/delete" class="inline-form">
+              <button type="submit" class="link-button">删除</button>
+            </form>
+          </div>
+        </div>
+        <dl class="project-meta">
+          <dt>根目录</dt><dd><code>{{ project.root_path }}</code></dd>
+          <dt>Python</dt><dd><code>{{ project.python_executable }}</code></dd>
+          <dt>收集超时</dt><dd>{{ project.collect_timeout_seconds }}s</dd>
+        </dl>
+      </article>
+    {% endfor %}
   </div>
 </section>
 {% endblock %}

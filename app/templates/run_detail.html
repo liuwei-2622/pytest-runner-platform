@@ -120,10 +120,10 @@
                 <div>{{ case.message or '-' }}</div>
                 {% if case.details %}<pre class="log compact-log">{{ case.details }}</pre>{% endif %}
               </td>
-              <td>
+              <td class="case-actions">
                 {% set case_index = failed_pagination.offset + loop.index0 %}
                 <form class="inline-form" method="post" action="/runs/{{ run.id }}/failed-cases/{{ case_index }}/rerun">
-                  <button type="submit" class="link-button">重跑此用例</button>
+                  <button type="submit" class="case-rerun-button">重跑</button>
                 </form>
               </td>
             </tr>
