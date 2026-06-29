@@ -698,10 +698,12 @@ async def delete_selected_runs(
     else:
         try:
             result = delete_runs(run_ids)
-        except OSError as exc:
-            raise HTTPException(status_code=500, detail=f"删除运行记录失败：{exc}") from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except (OSError, ValueError) as exc:
+            error = f"删除运行记录失败：{exc}"
+            return RedirectResponse(
+                url=f"/runs?page={safe_page}&page_size={safe_page_size}&error={quote(error)}",
+                status_code=http_status.HTTP_303_SEE_OTHER,
+            )
         message = format_delete_runs_message(result)
     return RedirectResponse(
         url=f"/runs?page={safe_page}&page_size={safe_page_size}&message={quote(message)}",
