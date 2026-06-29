@@ -63,6 +63,7 @@ curl -sS http://127.0.0.1:8000/runs | grep -E "删除选中记录|bulk-delete-fo
 - Keep changes focused; do not bundle unrelated refactors.
 - Match existing FastAPI/Jinja2 patterns in `app/main.py` and `app/templates/`.
 - Use `python3 -m pytest` for verification and report exact failures if tests do not pass.
+- Default to a single agent or direct work for tasks in this repository; do not launch multiple agents or workflows unless the user explicitly requests multi-agent orchestration.
 
 ## Run Record Deletion Safety
 
